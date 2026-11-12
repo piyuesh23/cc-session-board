@@ -1,22 +1,75 @@
 {
   "hooks": {
     "SessionStart": [
-      { "hooks": [{ "type": "command", "command": "python3 ~/cc-session-board/hooks/cc_board_hook.py", "async": true }] }
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 ~/cc-session-board/hooks/cc_board_hook.py",
+            "async": true
+          }
+        ]
+      }
     ],
     "SessionEnd": [
-      { "hooks": [{ "type": "command", "command": "python3 ~/cc-session-board/hooks/cc_board_hook.py", "timeout": 5 }] }
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 ~/cc-session-board/hooks/cc_board_hook.py",
+            "timeout": 5
+          }
+        ]
+      }
     ],
     "UserPromptSubmit": [
-      { "hooks": [{ "type": "command", "command": "python3 ~/cc-session-board/hooks/cc_board_hook.py", "async": true }] }
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 ~/cc-session-board/hooks/cc_board_hook.py",
+            "async": true
+          }
+        ]
+      }
     ],
     "PostToolUse": [
-      { "matcher": "*", "hooks": [{ "type": "command", "command": "python3 ~/cc-session-board/hooks/cc_board_hook.py", "async": true }] }
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 ~/cc-session-board/hooks/cc_board_hook.py",
+            "async": true
+          }
+        ]
+      }
     ],
     "Notification": [
-      { "hooks": [{ "type": "command", "command": "python3 ~/cc-session-board/hooks/cc_board_hook.py", "async": true }] }
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 ~/cc-session-board/hooks/cc_board_hook.py",
+            "async": true
+          }
+        ]
+      }
     ],
     "Stop": [
-      { "hooks": [{ "type": "command", "command": "python3 ~/cc-session-board/hooks/cc_board_hook.py", "async": true }] }
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 ~/cc-session-board/hooks/cc_board_hook.py",
+            "async": true
+          }
+        ]
+      }
     ]
+  },
+  "statusLine": {
+    "type": "command",
+    "command": "~/cc-session-board/hooks/cc_board_statusline.sh bash ~/.claude/statusline-command.sh"
   }
 }

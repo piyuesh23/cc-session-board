@@ -4,6 +4,7 @@
 //
 //   POST /event     hook events from Claude Code (needs x-board-secret)
 //   POST /vitals    devbox CPU / RAM (needs x-board-secret)
+//   POST /usage     Claude subscription limits from the status line (needs x-board-secret)
 //   GET  /sessions  current board as JSON
 //   GET  /live      same payload pushed over Server-Sent Events, plus a ping every 15s
 //   POST /ack       board tap: acknowledge a tile
@@ -19,6 +20,7 @@ const { Store } = require('./lib/store');
 
 const MAX_BODY = 64 * 1024;
 const VITALS_FRESH_MS = 2 * 60e3;
+const USAGE_WINDOWS = ['five_hour', 'seven_day'];
 
 function readConfig(env = process.env) {
   const minutes = (name, fallback) => {
@@ -57,6 +59,31 @@ function resolveHost(host, exec = execFileSync) {
 function bindWarning(host) {
   if (host !== '0.0.0.0' && host !== '::' && host !== '') return null;
   return `WARNING: HOST=${host || '(empty)'} listens on every interface. /sessions, /live, /ack & /hide need no secret. Set HOST=tailscale or the Tailscale IP.`;
+}
+
+// One Claude rate-limit window as the status line reports it: a percentage used
+// and an epoch-seconds reset time. Anything malformed drops the window.
+function parseWindow(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const used = Number(raw.used_percentage);
+  const resets = Number(raw.resets_at);
+  if (!Number.isFinite(used) || used < 0 || used > 100) return null;
+  if (!Number.isFinite(resets) || resets <= 0) return null;
+  return { usedPct: Math.round(used * 10) / 10, resetsAt: Math.round(resets) * 1000 };
+}
+
+function parseUsage(body) {
+  const windows = {};
+  for (const name of USAGE_WINDOWS) {
+    const w = parseWindow(body[name]);
+    if (w) windows[name] = w;
+  }
+  if (!Object.keys(windows).length) return null;
+  return {
+    host: typeof body.host === 'string' ? body.host.slice(0, 64) : '',
+    ...windows,
+    at: Date.now(),
+  };
 }
 
 function sameSecret(given, expected) {
@@ -109,6 +136,7 @@ function createHub(config = readConfig()) {
   });
   const clients = new Set();
   let vitals = null;
+  let usage = null;
   let lastSent = '';
   let saveTimer = null;
 
@@ -131,13 +159,14 @@ function createHub(config = readConfig()) {
         total: sessions.length,
       },
       vitals: fresh,
+      usage,
       config: { quietHours: config.quietHours },
     };
   }
 
   // Everything except the clock, so the ticker only pushes real changes.
   function fingerprint(p) {
-    return JSON.stringify([p.sessions, p.counts, p.vitals]);
+    return JSON.stringify([p.sessions, p.counts, p.vitals, p.usage]);
   }
 
   function broadcast(force = false) {
@@ -199,7 +228,7 @@ function createHub(config = readConfig()) {
       return;
     }
 
-    if (route === 'POST /event' || route === 'POST /vitals') {
+    if (route === 'POST /event' || route === 'POST /vitals' || route === 'POST /usage') {
       if (!sameSecret(req.headers['x-board-secret'], config.secret)) {
         return send(res, 401, { ok: false, error: 'bad or missing x-board-secret' });
       }
@@ -208,6 +237,13 @@ function createHub(config = readConfig()) {
         const result = store.apply(body);
         if (!result.ok) return send(res, 400, result);
         changed();
+        return send(res, 200, { ok: true });
+      }
+      if (route === 'POST /usage') {
+        const parsed = parseUsage(body);
+        if (!parsed) return send(res, 400, { ok: false, error: 'no valid five_hour or seven_day window' });
+        usage = parsed;
+        broadcast();
         return send(res, 200, { ok: true });
       }
       const num = (v) => (Number.isFinite(Number(v)) ? Number(v) : null);
@@ -285,4 +321,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { createHub, readConfig, resolveHost, bindWarning };
+module.exports = { createHub, readConfig, resolveHost, bindWarning, parseUsage };

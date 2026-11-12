@@ -8,10 +8,27 @@ const assert = require('node:assert/strict');
 const path = require('node:path');
 const fs = require('node:fs');
 const os = require('node:os');
-const { execFileSync, spawnSync } = require('node:child_process');
+const { execFileSync, spawn } = require('node:child_process');
+
+// The hub runs in this process, so a child that talks to it must not be
+// awaited synchronously: a blocking wait would stall the event loop and the
+// hub could never answer. Resolves with { status, stdout, stderr }.
+function run(cmd, args, { input, env }) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(cmd, args, { env, stdio: ['pipe', 'pipe', 'pipe'] });
+    let stdout = '', stderr = '';
+    child.stdout.on('data', (d) => { stdout += d; });
+    child.stderr.on('data', (d) => { stderr += d; });
+    child.on('error', reject);
+    child.on('close', (status) => resolve({ status, stdout, stderr }));
+    child.stdin.end(input);
+  });
+}
 const { createHub } = require('../server');
 
 const HOOK = path.join(__dirname, '..', 'hooks', 'cc_board_hook.py');
+const USAGE = path.join(__dirname, '..', 'hooks', 'cc_board_usage.py');
+const WRAPPER = path.join(__dirname, '..', 'hooks', 'cc_board_statusline.sh');
 const SECRET = 'test-secret';
 
 function hasPython() {
@@ -53,7 +70,7 @@ test('credentials are masked, ordinary commands are not', { skip }, () => {
   assert.deepEqual(redactAll(cases.map(([raw]) => raw)), cases.map(([, masked]) => masked));
 });
 
-test('the hook posts a redacted tool target to the hub', { skip }, async () => {
+async function withHubAndScratch(fn) {
   const hub = createHub({
     port: 0, host: '127.0.0.1', secret: SECRET,
     staleMin: 10, hideMin: 60, blockedMaxH: 24, quietHours: '23:00-07:00', stateFile: '',
@@ -62,7 +79,19 @@ test('the hook posts a redacted tool target to the hub', { skip }, async () => {
   const base = `http://127.0.0.1:${hub.server.address().port}`;
   // A fresh HOME & TMPDIR: no real ~/.config/cc-board/env, no throttle stamp from an earlier run.
   const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'cc-board-hook-'));
+  const env = { PATH: process.env.PATH, HOME: scratch, TMPDIR: scratch, CC_BOARD_URL: base, CC_BOARD_SECRET: SECRET, CC_BOARD_HOST: 'testbox' };
+  const board = async () => (await fetch(base + '/sessions')).json();
   try {
+    await fn({ base, env, board });
+  } finally {
+    hub.server.closeAllConnections();
+    await new Promise((resolve) => hub.server.close(resolve));
+    fs.rmSync(scratch, { recursive: true, force: true });
+  }
+}
+
+test('the hook posts a redacted tool target to the hub', { skip }, async () => {
+  await withHubAndScratch(async ({ env, board }) => {
     const hookInput = {
       hook_event_name: 'PostToolUse',
       session_id: 'hook-e2e',
@@ -70,14 +99,10 @@ test('the hook posts a redacted tool target to the hub', { skip }, async () => {
       tool_name: 'Bash',
       tool_input: { command: 'export API_TOKEN=sk-abcdefghijklmnop1234 && ./deploy.sh' },
     };
-    const run = spawnSync('python3', [HOOK], {
-      input: JSON.stringify(hookInput),
-      env: { PATH: process.env.PATH, HOME: scratch, TMPDIR: scratch, CC_BOARD_URL: base, CC_BOARD_SECRET: SECRET, CC_BOARD_HOST: 'testbox' },
-      timeout: 10000,
-    });
-    assert.equal(run.status, 0, String(run.stderr));
+    const hook = await run('python3', [HOOK], { input: JSON.stringify(hookInput), env });
+    assert.equal(hook.status, 0, hook.stderr);
 
-    const p = await (await fetch(base + '/sessions')).json();
+    const p = await board();
     assert.equal(p.sessions.length, 1);
     const s = p.sessions[0];
     assert.equal(s.host, 'testbox');
@@ -86,9 +111,60 @@ test('the hook posts a redacted tool target to the hub', { skip }, async () => {
     assert.equal(s.tool, 'Bash');
     assert.equal(s.target, 'export API_TOKEN=*** && ./deploy.sh');
     assert.doesNotMatch(JSON.stringify(p), /sk-abcdefghijklmnop1234/);
-  } finally {
-    hub.server.closeAllConnections();
-    await new Promise((resolve) => hub.server.close(resolve));
-    fs.rmSync(scratch, { recursive: true, force: true });
-  }
+  });
+});
+
+const statusLine = (fiveHour, sevenDay) => ({
+  model: { display_name: 'Opus' },
+  cwd: '/tmp/x',
+  context_window: { remaining_percentage: 61 },
+  rate_limits: { five_hour: fiveHour, seven_day: sevenDay },
+});
+
+test('the usage pusher sends only the rate limits, once per change', { skip }, async () => {
+  await withHubAndScratch(async ({ env, board }) => {
+    const push = (input) => run('python3', [USAGE], { input: JSON.stringify(input), env: { ...env, CC_BOARD_DEBUG: '1' } });
+
+    assert.equal((await push({ model: { display_name: 'Opus' } })).status, 0);
+    assert.equal((await board()).usage, null, 'no rate_limits means nothing is posted');
+
+    const first = statusLine({ used_percentage: 23.5, resets_at: 1738425600 }, { used_percentage: 41.2, resets_at: 1738857600 });
+    assert.equal((await push(first)).stderr, '');
+    let u = (await board()).usage;
+    assert.equal(u.host, 'testbox');
+    assert.deepEqual(u.five_hour, { usedPct: 23.5, resetsAt: 1738425600e3 });
+    assert.deepEqual(u.seven_day, { usedPct: 41.2, resetsAt: 1738857600e3 });
+    const firstAt = u.at;
+
+    await new Promise((r) => setTimeout(r, 5));
+    assert.equal((await push(first)).stderr, '');
+    assert.equal((await board()).usage.at, firstAt, 'unchanged numbers are not re-sent');
+
+    assert.equal((await push(statusLine({ used_percentage: 30, resets_at: 1738425600 }, undefined))).stderr, '');
+    u = (await board()).usage;
+    assert.equal(u.five_hour.usedPct, 30);
+    assert.equal(u.seven_day, undefined, 'a window Claude Code dropped is dropped here too');
+    assert.ok(u.at > firstAt);
+  });
+});
+
+test('the status line wrapper passes the JSON through and pushes in the background', { skip }, async () => {
+  await withHubAndScratch(async ({ env, board }) => {
+    const input = JSON.stringify(statusLine({ used_percentage: 88, resets_at: 1738425600 }, undefined));
+    const wrapped = await run('bash', [WRAPPER, 'node', '-e', 'process.stdin.pipe(process.stdout)'], { input, env });
+    assert.equal(wrapped.status, 0, wrapped.stderr);
+    assert.equal(wrapped.stdout, input, 'the wrapped status line sees the same JSON');
+
+    // the push is detached, so give it a moment
+    let usage = null;
+    for (let i = 0; i < 40 && !usage; i++) {
+      await new Promise((r) => setTimeout(r, 100));
+      usage = (await board()).usage;
+    }
+    assert.equal(usage && usage.five_hour.usedPct, 88);
+
+    const quiet = await run('bash', [WRAPPER], { input, env });
+    assert.equal(quiet.status, 0);
+    assert.equal(quiet.stdout, '', 'no wrapped command, no output');
+  });
 });

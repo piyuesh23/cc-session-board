@@ -2,7 +2,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { createHub, resolveHost, bindWarning } = require('../server');
+const { createHub, resolveHost, bindWarning, parseUsage } = require('../server');
 
 const SECRET = 'test-secret';
 
@@ -82,6 +82,31 @@ test('events show up on /sessions, ack and hide work', async () => {
     assert.equal(p.sessions.length, 0);
 
     assert.equal((await post('/ack', { id: 'missing' }, '')).status, 404);
+  });
+});
+
+test('usage windows are validated one by one', () => {
+  const good = { five_hour: { used_percentage: 23.46, resets_at: 1738425600 }, seven_day: { used_percentage: 41.2, resets_at: 1738857600 } };
+  const u = parseUsage({ host: 'mac', ...good });
+  assert.equal(u.host, 'mac');
+  assert.deepEqual(u.five_hour, { usedPct: 23.5, resetsAt: 1738425600e3 });
+  assert.deepEqual(u.seven_day, { usedPct: 41.2, resetsAt: 1738857600e3 });
+  assert.ok(Date.now() - u.at < 1000);
+  // one bad window is dropped, the other kept; nothing valid is a refusal
+  assert.equal(parseUsage({ five_hour: { used_percentage: 120, resets_at: 1 }, seven_day: good.seven_day }).five_hour, undefined);
+  assert.equal(parseUsage({ five_hour: { used_percentage: 'x' } }), null);
+  assert.equal(parseUsage({}), null);
+});
+
+test('usage needs the secret, lands on /sessions and is pushed live', async () => {
+  await withHub(async ({ base, post }) => {
+    const body = { host: 'mac', five_hour: { used_percentage: 85, resets_at: 1738425600 } };
+    assert.equal((await post('/usage', body, '')).status, 401);
+    assert.equal((await post('/usage', { host: 'mac' })).status, 400);
+    assert.equal((await post('/usage', body)).status, 200);
+    const p = await (await fetch(base + '/sessions')).json();
+    assert.equal(p.usage.five_hour.usedPct, 85);
+    assert.equal(p.usage.seven_day, undefined);
   });
 });
 

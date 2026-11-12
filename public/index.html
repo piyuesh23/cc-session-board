@@ -22,6 +22,9 @@
     --green: #1e7b40;
     --blue: #1d5fc4;
     --grey: #232327;
+    --ok: #34c759;
+    --warn: #f5a623;
+    --hot: #ff453a;
   }
   * { box-sizing: border-box; }
   html, body {
@@ -58,7 +61,19 @@
     margin-top: 10px; font: inherit; font-size: 12px; font-weight: 700;
     color: var(--text); background: #2c2c31; border: 0; border-radius: 8px; padding: 7px 6px;
   }
-  #sound[hidden], #vitals[hidden] { display: none; }
+  #sound[hidden], #vitals[hidden], #usage[hidden], .limit[hidden] { display: none; }
+
+  /* Claude subscription windows: used share of each limit, coloured by how close it is */
+  .limit { margin-top: 8px; }
+  .limit-head { display: flex; justify-content: space-between; font-size: 13px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .bar { height: 6px; border-radius: 3px; background: #2c2c31; overflow: hidden; margin-top: 3px; }
+  .bar i { display: block; height: 100%; width: 0; border-radius: 3px; background: var(--ok); transition: width .6s ease; }
+  .limit.warn .pct, .limit.hot .pct { color: var(--warn); }
+  .limit.warn .bar i { background: var(--warn); }
+  .limit.hot .pct { color: var(--hot); }
+  .limit.hot .bar i { background: var(--hot); }
+  .limit.old { opacity: .45; }
+  .reset { font-size: 11px; color: var(--muted); margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .meta b { font-weight: 800; }
 
   /* Session tiles */
@@ -110,6 +125,8 @@
     #app { grid-template-columns: 1fr; grid-template-rows: auto 1fr; }
     .strip { flex-direction: row; flex-wrap: wrap; align-items: baseline; gap: 4px 16px; }
     #vitals:not([hidden]) { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 16px; }
+    #usage:not([hidden]) { display: flex; align-items: baseline; gap: 4px 12px; }
+    .limit { margin-top: 0; min-width: 84px; }
     .label { margin-top: 0; }
     .counts { margin: 0 0 0 auto; border: 0; padding: 0; text-align: right; }
     .tiles { flex-direction: column; overflow: hidden auto; }
@@ -129,6 +146,19 @@
       <div class="label">RAM</div>
       <div class="value" id="ram">—</div>
     </div>
+    <div id="usage" hidden>
+      <div class="label">CLAUDE</div>
+      <div class="limit" id="limit-five_hour" hidden>
+        <div class="limit-head"><span>5h</span><span class="pct">—</span></div>
+        <div class="bar"><i></i></div>
+        <div class="reset"></div>
+      </div>
+      <div class="limit" id="limit-seven_day" hidden>
+        <div class="limit-head"><span>Week</span><span class="pct">—</span></div>
+        <div class="bar"><i></i></div>
+        <div class="reset"></div>
+      </div>
+    </div>
     <button id="sound" type="button">Tap for sound</button>
     <div class="counts">
       <div class="waiting" id="waiting">0 waiting</div>
@@ -147,6 +177,8 @@
   const STATE_WORD = { needs_input: 'NEEDS INPUT', working: 'WORKING', done: 'DONE', stale: 'STALE' };
   const LONG_PRESS_MS = 600;
   const WATCHDOG_MS = 40e3;  // the hub pings every 15s; silence this long means the socket is dead
+  const USAGE_OLD_MS = 60 * 60e3;  // the status line only reports while a session is talking
+  const USAGE_WARN = 50, USAGE_HOT = 85;  // Claude Code itself warns at 85%
   const IDLE_DIM_MS = 30 * 60e3;
   const TOUCH_WAKE_MS = 60e3;
   const SHIFTS = [[0, 0], [3, 2], [-2, 3], [-3, -2], [2, -3]];
@@ -164,6 +196,7 @@
   let audio = null;
   let es = null;             // the live stream
   let lastFrame = 0;         // when the hub last said anything (payload or ping)
+  let usage = null;          // last subscription usage from the hub
 
   function span(ms) {
     const s = Math.max(0, Math.floor(ms / 1000));
@@ -183,6 +216,32 @@
     while (size > 13 && text.getBoundingClientRect().width > el.getBoundingClientRect().width) {
       size -= 1;
       el.style.fontSize = size + 'px';
+    }
+  }
+
+  // "2h10" below a day, "3d 4h" above, so the week window reads at a glance.
+  function until(ms) {
+    const h = Math.floor(Math.max(0, ms) / 3600e3);
+    return h >= 24 ? Math.floor(h / 24) + 'd ' + (h % 24) + 'h' : span(ms);
+  }
+
+  function renderUsage() {
+    $('usage').hidden = !usage;
+    if (!usage) return;
+    const hubNow = Date.now() + clockOffset;
+    const old = hubNow - usage.at > USAGE_OLD_MS;
+    for (const key of ['five_hour', 'seven_day']) {
+      const el = $('limit-' + key);
+      const w = usage[key];
+      el.hidden = !w;
+      if (!w) continue;
+      const expired = hubNow >= w.resetsAt;
+      const pct = expired ? 0 : Math.round(w.usedPct);
+      const level = pct >= USAGE_HOT ? 'hot' : pct >= USAGE_WARN ? 'warn' : 'ok';
+      el.className = 'limit ' + level + (old ? ' old' : '');
+      el.querySelector('.pct').textContent = expired ? 'reset' : pct + '%';
+      el.querySelector('.bar i').style.width = pct + '%';
+      el.querySelector('.reset').textContent = expired ? 'window reset' : 'resets in ' + until(w.resetsAt - hubNow);
     }
   }
 
@@ -276,6 +335,8 @@
     $('waiting').classList.toggle('on', p.counts.waiting > 0);
     $('total').textContent = p.counts.total + (p.counts.total === 1 ? ' session' : ' sessions');
 
+    usage = p.usage || null;
+
     const v = p.vitals;
     $('vitals').hidden = !v;
     $('host').textContent = (v && v.host) || '';
@@ -305,6 +366,7 @@
 
     const hubNow = Date.now() + clockOffset;
     for (const t of tiles.values()) t.parts.timer.textContent = span(hubNow - t.session.since);
+    renderUsage();
 
     const touched = Date.now() - lastTouch < TOUCH_WAKE_MS;
     const idle = Date.now() - lastChange > IDLE_DIM_MS;

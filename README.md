@@ -29,6 +29,7 @@ Fedora  /
 - The big number on each tile is the time spent in the current state.
 - The foot of each tile names the machine the session is on, so I know which laptop to go to.
 - The left strip has the clock & a count of waiting sessions. CPU & RAM of one Linux box show up there too if you run the vitals pusher.
+- **Claude subscription usage** (Pro, Max & Ultra plans) sits in the strip as two bars, the 5-hour window & the week, with the share used & the time until each resets. Green below 50% used, amber from 50%, red from 85% (where Claude Code itself starts warning). The bars fade when the last report is over an hour old, & say "reset" once a window has rolled over.
 - **Tap** a tile to acknowledge it: the pulse stops. **Long press** to hide it until its next event.
 - A chime plays on the iPhone when a session newly needs input. Tap the screen once after loading to allow sound.
 - The screen dims in quiet hours (23:00 to 07:00 by default) & after 30 minutes with no change. Touch it to wake it for a minute.
@@ -78,6 +79,8 @@ chmod 600 ~/.config/cc-board/env
 
 Merge the `hooks` block from `hooks/settings.example.json` into `~/.claude/settings.json`. Sessions started after that will show up on the board.
 
+For the subscription usage bars, also set `statusLine` as in `hooks/settings.example.json`. Claude Code only exposes the 5-hour & weekly limits to the status line command, so `hooks/cc_board_statusline.sh` reads them from there, posts them to the hub in the background & then runs whatever status line you already had (pass that command as its arguments; leave them out if you had none). Your status line output does not change. Do this on one laptop or all of them: the numbers are per account, so every laptop reports the same ones & the latest report wins.
+
 Optional, for CPU & RAM of one always-on Linux box (e.g. the devbox) in the left strip. It reads `/proc`, so it doesn't run on macOS:
 
 ```bash
@@ -113,9 +116,10 @@ Hub, in `.env`:
 ## Things to know
 
 - **Security:** `/event` & `/vitals` need the secret. Everything the page uses doesn't, because the page can't keep a secret: `/sessions` & `/live` (which carry tool targets & the last assistant message) and `/ack` & `/hide`. So the hub is only as private as the network it listens on: set `HOST=tailscale` (or the Tailscale IP) & keep it off the LAN. The hub prints a warning at startup when it listens on every interface.
-- **What leaves the laptop:** machine name, project directory name, branch, tool name, the file or command a tool is acting on (120 chars), the notification text & the last assistant message (200 chars). Prompts are never sent. Anything that looks like a credential in those strings (`TOKEN=…`, `Bearer …`, `user:pass@`, `--password …`, known key shapes, long random blobs) is masked with `***` by the hook before it is sent, because the hub keeps them in plain text.
+- **What leaves the laptop:** machine name, project directory name, branch, tool name, the file or command a tool is acting on (120 chars), the notification text & the last assistant message (200 chars), & from the status line only the two usage percentages & their reset times. Prompts are never sent. Anything that looks like a credential in those strings (`TOKEN=…`, `Bearer …`, `user:pass@`, `--password …`, known key shapes, long random blobs) is masked with `***` by the hook before it is sent, because the hub keeps them in plain text.
 - **Hooks never block a session:** they run with `async`, the script times out after 2 seconds & always exits 0. If the Pi is off, Claude Code carries on as normal.
-- **Tool events are throttled** to one every 5 seconds per session.
+- **Tool events are throttled** to one every 5 seconds per session. Usage is sent when the numbers change, or every 5 minutes otherwise.
+- **Usage can lag:** Claude Code refreshes the status line after each assistant message, so the bars are current while you work & freeze when every session is idle (they fade after an hour). They appear only once a session has had its first reply, & only on claude.ai subscription plans, not API keys.
 - **Laptops sleep & roam:** a closed lid sends no event, so that session's tile goes grey after 10 minutes & drops off after 60. Off the tailnet the hook just gives up quietly; the board catches up on the next event.
 - **Idle notifications:** Claude Code sends an idle notification about a minute after a turn ends. The board keeps that session blue instead of turning it amber, otherwise every finished session would chime twice. An `auth_success` notification is informational too & leaves the tile as it is; any other notification type counts as a question.
 - **Live updates use SSE, not a websocket.** It needs no library on the Pi & Safari reconnects on its own when it notices a drop. iOS often doesn't notice (a suspended home screen app, a Wi-Fi or Tailscale reconnect), so the hub pings every 15 seconds & the page starts over, fetching the board first, after 40 seconds of silence or whenever it becomes visible or comes back online. The "Hub offline" pill shows while that happens.
@@ -134,4 +138,5 @@ npm test          # hub, state logic & the Python hook (needs python3)
 - `server.js`: HTTP routes, SSE, snapshot file.
 - `public/index.html`: the board.
 - `hooks/cc_board_hook.py`: the Claude Code hook.
+- `hooks/cc_board_statusline.sh` + `hooks/cc_board_usage.py`: status line wrapper that forwards the subscription usage.
 - `scripts/push_vitals.py`, `scripts/simulate.js`: vitals pusher & sample data.

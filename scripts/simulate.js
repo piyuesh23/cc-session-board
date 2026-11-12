@@ -45,7 +45,14 @@ const event = (session_id, project, branch, rest) =>
 
   await event('sim-4', 'sd-wiki', 'main', { event: 'session_start' });
 
-  console.log(`4 sample sessions posted to ${base}`);
+  const now = Math.floor(Date.now() / 1000);
+  await post('/usage', {
+    host: 'mac',
+    five_hour: { used_percentage: 62, resets_at: now + 2 * 3600 + 600 },
+    seven_day: { used_percentage: 88, resets_at: now + 3 * 86400 + 5 * 3600 },
+  });
+
+  console.log(`4 sample sessions & sample usage posted to ${base}`);
 })().catch((err) => {
   console.error(err.message);
   process.exit(1);
