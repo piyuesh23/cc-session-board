@@ -35,6 +35,33 @@ EVENTS = {
 TOOL_THROTTLE_S = 5
 POST_TIMEOUT_S = 2
 
+# Tool targets & messages are stored in plain text on the hub, so anything that
+# looks like a credential is masked before it leaves the laptop.
+SENSITIVE_KEY = r"[A-Za-z0-9_.-]*(?:secret|token|passw(?:or)?d|pwd|api[_-]?key|apikey|auth|credential|private[_-]?key)[A-Za-z0-9_.-]*"
+REDACTIONS = [
+    # --password foo, --token=foo
+    (re.compile(r"(?i)(--?(?:password|passwd|token|secret|api[_-]?key)(?:[=\s]+))(\S+)"), r"\1***"),
+    # Authorization: Bearer xxx, Basic xxx
+    (re.compile(r"(?i)\b(bearer|basic)\s+[A-Za-z0-9._~+/=-]{8,}"), r"\1 ***"),
+    # KEY=value, KEY: value, ?key=value, "key": "value" (a scheme word is not the value)
+    (re.compile(r"(?i)\b(" + SENSITIVE_KEY + r")([\"']?\s*[=:]\s*[\"']?)(?!(?:bearer|basic)\b|\*\*\*)([^\s\"'&;]+)"), r"\1\2***"),
+    # user:pass@host in URLs
+    (re.compile(r"(://[^\s/@:]+):[^\s/@]+@"), r"\1:***@"),
+    # Well-known key shapes: OpenAI, GitHub, Slack, AWS, JWT
+    (re.compile(r"\b(?:sk-[A-Za-z0-9_-]{8,}|gh[pousr]_[A-Za-z0-9]{8,}|xox[a-z]-[A-Za-z0-9-]{8,}|AKIA[A-Z0-9]{12,}|eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{5,}(?:\.[A-Za-z0-9_-]+)?)\b"), "***"),
+    # Any long opaque blob with both letters & digits (hex, base64, random keys)
+    (re.compile(r"\b(?=[A-Za-z0-9_-]*\d)(?=[A-Za-z0-9_-]*[A-Za-z])[A-Za-z0-9_-]{32,}\b"), "***"),
+]
+
+
+def redact(text):
+    """Mask anything that looks like a credential."""
+    if not isinstance(text, str) or not text:
+        return text
+    for pattern, replacement in REDACTIONS:
+        text = pattern.sub(replacement, text)
+    return text
+
 
 def load_config():
     cfg = {
@@ -132,12 +159,12 @@ def build_event(data):
         if throttled(session_id):
             return None
         payload["tool"] = data.get("tool_name") or ""
-        payload["target"] = tool_target(data.get("tool_input"), cwd)
+        payload["target"] = redact(tool_target(data.get("tool_input"), cwd))
     elif event == "notification":
-        payload["message"] = data.get("message") or ""
+        payload["message"] = redact(data.get("message") or "")
         payload["notification_type"] = data.get("notification_type") or ""
     elif event == "stop":
-        payload["message"] = data.get("last_assistant_message") or ""
+        payload["message"] = redact(data.get("last_assistant_message") or "")
 
     if cwd:
         payload["branch"] = git_branch(cwd)

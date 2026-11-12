@@ -113,7 +113,7 @@ Hub, in `.env`:
 ## Things to know
 
 - **Security:** `/event` & `/vitals` need the secret. Everything the page uses doesn't, because the page can't keep a secret: `/sessions` & `/live` (which carry tool targets & the last assistant message) and `/ack` & `/hide`. So the hub is only as private as the network it listens on: set `HOST=tailscale` (or the Tailscale IP) & keep it off the LAN. The hub prints a warning at startup when it listens on every interface.
-- **What leaves the laptop:** machine name, project directory name, branch, tool name, the file or command a tool is acting on (120 chars), the notification text & the last assistant message (200 chars). Prompts are never sent.
+- **What leaves the laptop:** machine name, project directory name, branch, tool name, the file or command a tool is acting on (120 chars), the notification text & the last assistant message (200 chars). Prompts are never sent. Anything that looks like a credential in those strings (`TOKEN=…`, `Bearer …`, `user:pass@`, `--password …`, known key shapes, long random blobs) is masked with `***` by the hook before it is sent, because the hub keeps them in plain text.
 - **Hooks never block a session:** they run with `async`, the script times out after 2 seconds & always exits 0. If the Pi is off, Claude Code carries on as normal.
 - **Tool events are throttled** to one every 5 seconds per session.
 - **Laptops sleep & roam:** a closed lid sends no event, so that session's tile goes grey after 10 minutes & drops off after 60. Off the tailnet the hook just gives up quietly; the board catches up on the next event.
@@ -127,7 +127,7 @@ This is the "Live" tier of the spec. Still open: the history drawer (the hub alr
 ## Development
 
 ```bash
-npm test          # 17 tests, hub & state logic
+npm test          # hub, state logic & the Python hook (needs python3)
 ```
 
 - `lib/store.js`: session state & ordering, no I/O.
