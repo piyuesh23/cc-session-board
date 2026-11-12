@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Push devbox CPU & RAM to the hub. Linux only (reads /proc).
+"""Push this machine's CPU & RAM to the hub. Linux only (reads /proc).
 
     python3 push_vitals.py            # one sample
     python3 push_vitals.py --loop 30  # one sample every 30 s

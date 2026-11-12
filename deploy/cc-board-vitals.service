@@ -1,5 +1,5 @@
 [Unit]
-Description=cc-session-board devbox vitals
+Description=cc-session-board vitals (Linux only)
 After=network-online.target tailscaled.service
 Wants=network-online.target
 

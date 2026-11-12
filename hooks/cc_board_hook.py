@@ -4,14 +4,18 @@
 Reads the hook JSON on stdin, posts a small event to the hub and exits 0.
 It never blocks or fails a Claude Code session: any error is swallowed.
 
+Works on macOS & Linux with the Python 3 standard library only.
+
 Config comes from the environment, or from ~/.config/cc-board/env:
     CC_BOARD_URL=http://<pi-tailscale-ip>:8787
     CC_BOARD_SECRET=<same value as BOARD_SECRET on the hub>
+    CC_BOARD_HOST=mac          # optional label for this machine on the board
 """
 
 import json
 import os
 import re
+import socket
 import subprocess
 import sys
 import tempfile
@@ -36,9 +40,8 @@ def load_config():
     cfg = {
         "url": os.environ.get("CC_BOARD_URL", ""),
         "secret": os.environ.get("CC_BOARD_SECRET", ""),
+        "host": os.environ.get("CC_BOARD_HOST", ""),
     }
-    if cfg["url"] and cfg["secret"]:
-        return cfg
     path = os.path.expanduser("~/.config/cc-board/env")
     try:
         with open(path, encoding="utf-8") as fh:
@@ -52,8 +55,13 @@ def load_config():
                     cfg["url"] = value
                 elif key.strip() == "CC_BOARD_SECRET" and not cfg["secret"]:
                     cfg["secret"] = value
+                elif key.strip() == "CC_BOARD_HOST" and not cfg["host"]:
+                    cfg["host"] = value
     except OSError:
         pass
+    if not cfg["host"]:
+        # "Piyueshs-MacBook-Pro.local" -> "Piyueshs-MacBook-Pro"
+        cfg["host"] = socket.gethostname().split(".")[0]
     return cfg
 
 
@@ -151,6 +159,7 @@ def main():
     payload = build_event(data)
     if payload is None:
         return
+    payload["host"] = cfg["host"]
 
     request = urllib.request.Request(
         cfg["url"].rstrip("/") + "/event",

@@ -81,6 +81,15 @@ test('ack silences a tile until a new question arrives', () => {
   assert.equal(store.ack('missing'), false);
 });
 
+test('a session remembers which machine it runs on', () => {
+  const { store, ev } = makeStore();
+  ev('a', 'prompt', { host: 'mac' });
+  ev('a', 'tool', { tool: 'Read' });
+  assert.equal(store.list()[0].host, 'mac');
+  ev('b', 'prompt');
+  assert.equal(store.list().find((s) => s.id === 'b').host, '');
+});
+
 test('hide lasts until the next event from that session', () => {
   const { store, ev } = makeStore();
   ev('a', 'stop');

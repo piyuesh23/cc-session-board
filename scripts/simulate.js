@@ -21,7 +21,9 @@ async function post(path, body) {
   if (!res.ok) throw new Error(`${path} -> ${res.status} ${await res.text()}`);
 }
 
-const event = (session_id, project, branch, rest) => post('/event', { session_id, project, branch, ...rest });
+const HOSTS = { 'sim-1': 'mac', 'sim-2': 'mac', 'sim-3': 'fedora', 'sim-4': 'fedora' };
+const event = (session_id, project, branch, rest) =>
+  post('/event', { session_id, project, branch, host: HOSTS[session_id], ...rest });
 
 (async () => {
   await event('sim-1', 'alldata-commerce', 'feat/zuora-sync', { event: 'prompt' });
@@ -43,7 +45,6 @@ const event = (session_id, project, branch, rest) => post('/event', { session_id
 
   await event('sim-4', 'sd-wiki', 'main', { event: 'session_start' });
 
-  await post('/vitals', { host: 'piyuesh23-debian', cpu: 34, ram_used_gb: 18, ram_total_gb: 48 });
   console.log(`4 sample sessions posted to ${base}`);
 })().catch((err) => {
   console.error(err.message);
