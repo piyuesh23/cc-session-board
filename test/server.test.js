@@ -2,7 +2,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { createHub } = require('../server');
+const { createHub, resolveHost, bindWarning } = require('../server');
 
 const SECRET = 'test-secret';
 
@@ -29,6 +29,19 @@ async function withHub(fn) {
 
 test('refuses to start without a secret', () => {
   assert.throws(() => createHub({ secret: '' }), /BOARD_SECRET/);
+});
+
+test('HOST=tailscale resolves through the tailscale CLI, anything else passes through', () => {
+  assert.equal(resolveHost('127.0.0.1'), '127.0.0.1');
+  assert.equal(resolveHost('tailscale', () => '100.64.0.7\n'), '100.64.0.7');
+  assert.throws(() => resolveHost('tailscale', () => 'no ip'), /returned/);
+  assert.throws(() => resolveHost('tailscale', () => { throw new Error('ENOENT'); }), /failed/);
+});
+
+test('binding to every interface is called out', () => {
+  assert.match(bindWarning('0.0.0.0'), /every interface/);
+  assert.match(bindWarning(''), /every interface/);
+  assert.equal(bindWarning('100.64.0.7'), null);
 });
 
 test('events need the shared secret', async () => {

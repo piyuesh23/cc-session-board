@@ -103,7 +103,7 @@ Hub, in `.env`:
 | --- | --- | --- |
 | `BOARD_SECRET` | none, required | Shared secret for `/event` & `/vitals` |
 | `PORT` | `8787` | Listen port |
-| `HOST` | `0.0.0.0` | Listen address. Set it to the Pi's Tailscale IP |
+| `HOST` | `0.0.0.0` | Listen address. `tailscale` resolves the Pi's Tailscale IP at startup; the default warns because it listens on every interface |
 | `STALE_MIN` | `10` | Minutes of silence before a tile goes grey |
 | `HIDE_MIN` | `60` | Minutes of silence before a tile is dropped |
 | `BLOCKED_MAX_H` | `24` | Hours of silence before a blocked tile is dropped |
@@ -112,7 +112,7 @@ Hub, in `.env`:
 
 ## Things to know
 
-- **Security:** `/event` & `/vitals` need the secret. `/ack` & `/hide` don't, because the page can't keep a secret. So the hub is only as private as the network it listens on: bind `HOST` to the Tailscale IP & keep it off the LAN.
+- **Security:** `/event` & `/vitals` need the secret. Everything the page uses doesn't, because the page can't keep a secret: `/sessions` & `/live` (which carry tool targets & the last assistant message) and `/ack` & `/hide`. So the hub is only as private as the network it listens on: set `HOST=tailscale` (or the Tailscale IP) & keep it off the LAN. The hub prints a warning at startup when it listens on every interface.
 - **What leaves the laptop:** machine name, project directory name, branch, tool name, the file or command a tool is acting on (120 chars), the notification text & the last assistant message (200 chars). Prompts are never sent.
 - **Hooks never block a session:** they run with `async`, the script times out after 2 seconds & always exits 0. If the Pi is off, Claude Code carries on as normal.
 - **Tool events are throttled** to one every 5 seconds per session.

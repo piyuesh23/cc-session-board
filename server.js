@@ -14,6 +14,7 @@ const http = require('node:http');
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
+const { execFileSync } = require('node:child_process');
 const { Store } = require('./lib/store');
 
 const MAX_BODY = 64 * 1024;
@@ -34,6 +35,28 @@ function readConfig(env = process.env) {
     quietHours: env.QUIET_HOURS || '23:00-07:00',
     stateFile: env.STATE_FILE === undefined ? path.join(__dirname, 'data', 'state.json') : env.STATE_FILE,
   };
+}
+
+// HOST=tailscale binds to this machine's Tailscale IPv4 address, so the hub is
+// unreachable from the LAN without anyone having to look the address up.
+function resolveHost(host, exec = execFileSync) {
+  if (host !== 'tailscale') return host;
+  let out;
+  try {
+    out = String(exec('tailscale', ['ip', '-4'], { timeout: 5000 }));
+  } catch (err) {
+    throw new Error(`HOST=tailscale but "tailscale ip -4" failed: ${err.message}`);
+  }
+  const ip = out.trim().split(/\s+/)[0];
+  if (!/^\d{1,3}(\.\d{1,3}){3}$/.test(ip)) throw new Error(`HOST=tailscale but "tailscale ip -4" returned "${out.trim()}"`);
+  return ip;
+}
+
+// Everything the board reads (/sessions, /live, /ack, /hide) is unauthenticated,
+// so listening on every interface exposes it to whatever network the Pi is on.
+function bindWarning(host) {
+  if (host !== '0.0.0.0' && host !== '::' && host !== '') return null;
+  return `WARNING: HOST=${host || '(empty)'} listens on every interface. /sessions, /live, /ack & /hide need no secret. Set HOST=tailscale or the Tailscale IP.`;
 }
 
 function sameSecret(given, expected) {
@@ -247,9 +270,18 @@ if (require.main === module) {
     console.error(err.message);
     process.exit(1);
   }
-  hub.server.listen(hub.config.port, hub.config.host, () => {
-    console.log(`cc-session-board hub on http://${hub.config.host}:${hub.config.port}`);
+  let host;
+  try {
+    host = resolveHost(hub.config.host);
+  } catch (err) {
+    console.error(err.message);
+    process.exit(1);
+  }
+  const warning = bindWarning(host);
+  if (warning) console.error(warning);
+  hub.server.listen(hub.config.port, host, () => {
+    console.log(`cc-session-board hub on http://${host}:${hub.config.port}`);
   });
 }
 
-module.exports = { createHub, readConfig };
+module.exports = { createHub, readConfig, resolveHost, bindWarning };
