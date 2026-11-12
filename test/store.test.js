@@ -120,6 +120,24 @@ test('the idle notification after a finished turn does not turn the tile amber',
   assert.equal(store.list()[0].state, 'needs_input');
 });
 
+test('an informational notification keeps the current state', () => {
+  const { store, ev } = makeStore();
+  ev('a', 'prompt');
+  ev('a', 'tool', { tool: 'Bash', target: 'gh auth login' });
+  ev('a', 'notification', { notification_type: 'auth_success', message: 'Logged in' });
+  let s = store.list()[0];
+  assert.equal(s.state, 'working');
+  assert.equal(s.tool, 'Bash');
+  ev('a', 'stop', { message: 'Finished' });
+  ev('a', 'notification', { notification_type: 'auth_success', message: 'Logged in' });
+  s = store.list()[0];
+  assert.equal(s.state, 'done');
+  assert.equal(s.message, 'Finished');
+  // an unknown or missing type is still treated as a question
+  ev('a', 'notification', { message: 'Allow Bash?' });
+  assert.equal(store.list()[0].state, 'needs_input');
+});
+
 test('history keeps the last 10 events and long text is clipped', () => {
   const { store, ev } = makeStore();
   for (let i = 0; i < 15; i++) ev('a', 'tool', { tool: 'Bash', target: 'x'.repeat(500) });

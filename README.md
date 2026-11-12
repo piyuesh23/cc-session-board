@@ -117,7 +117,7 @@ Hub, in `.env`:
 - **Hooks never block a session:** they run with `async`, the script times out after 2 seconds & always exits 0. If the Pi is off, Claude Code carries on as normal.
 - **Tool events are throttled** to one every 5 seconds per session.
 - **Laptops sleep & roam:** a closed lid sends no event, so that session's tile goes grey after 10 minutes & drops off after 60. Off the tailnet the hook just gives up quietly; the board catches up on the next event.
-- **Idle notifications:** Claude Code sends an idle notification about a minute after a turn ends. The board keeps that session blue instead of turning it amber, otherwise every finished session would chime twice.
+- **Idle notifications:** Claude Code sends an idle notification about a minute after a turn ends. The board keeps that session blue instead of turning it amber, otherwise every finished session would chime twice. An `auth_success` notification is informational too & leaves the tile as it is; any other notification type counts as a question.
 - **Live updates use SSE, not a websocket.** It needs no library on the Pi & Safari reconnects on its own.
 
 ## Not built yet
