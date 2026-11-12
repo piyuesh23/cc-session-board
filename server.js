@@ -30,6 +30,7 @@ function readConfig(env = process.env) {
     secret: env.BOARD_SECRET || '',
     staleMin: minutes('STALE_MIN', 10),
     hideMin: minutes('HIDE_MIN', 60),
+    blockedMaxH: minutes('BLOCKED_MAX_H', 24),
     quietHours: env.QUIET_HOURS || '23:00-07:00',
     stateFile: env.STATE_FILE === undefined ? path.join(__dirname, 'data', 'state.json') : env.STATE_FILE,
   };
@@ -78,7 +79,11 @@ function send(res, status, body) {
 function createHub(config = readConfig()) {
   if (!config.secret) throw new Error('BOARD_SECRET is not set. Set it on the hub & in the hook env.');
 
-  const store = new Store({ staleMs: config.staleMin * 60e3, hideMs: config.hideMin * 60e3 });
+  const store = new Store({
+    staleMs: config.staleMin * 60e3,
+    hideMs: config.hideMin * 60e3,
+    blockedMaxMs: config.blockedMaxH * 60 * 60e3,
+  });
   const clients = new Set();
   let vitals = null;
   let lastSent = '';

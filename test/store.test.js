@@ -58,6 +58,15 @@ test('quiet sessions go stale, then drop off; blocked ones never do', () => {
   assert.deepEqual(store.list().map((s) => s.id), ['b']);
 });
 
+test('a blocked session is dropped after a day of silence', () => {
+  const { store, ev, advance } = makeStore();
+  ev('b', 'notification', { message: 'q' });
+  advance(23 * 60);
+  assert.equal(store.list()[0].state, 'needs_input');
+  advance(2 * 60);
+  assert.equal(store.list().length, 0);
+});
+
 test('the timer restarts only when the state changes', () => {
   const { store, ev, advance, clock } = makeStore();
   ev('a', 'prompt');

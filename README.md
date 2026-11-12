@@ -32,7 +32,7 @@ Fedora  /
 - **Tap** a tile to acknowledge it: the pulse stops. **Long press** to hide it until its next event.
 - A chime plays on the iPhone when a session newly needs input. Tap the screen once after loading to allow sound.
 - The screen dims in quiet hours (23:00 to 07:00 by default) & after 30 minutes with no change. Touch it to wake it for a minute.
-- A stale session is dropped from the board after 60 minutes. A blocked one never goes stale.
+- A stale session is dropped from the board after 60 minutes. A blocked one never goes stale, but is dropped after 24 hours of silence.
 
 ## Setup
 
@@ -106,6 +106,7 @@ Hub, in `.env`:
 | `HOST` | `0.0.0.0` | Listen address. Set it to the Pi's Tailscale IP |
 | `STALE_MIN` | `10` | Minutes of silence before a tile goes grey |
 | `HIDE_MIN` | `60` | Minutes of silence before a tile is dropped |
+| `BLOCKED_MAX_H` | `24` | Hours of silence before a blocked tile is dropped |
 | `QUIET_HOURS` | `23:00-07:00` | No chime & a dimmed screen, in the iPhone's local time |
 | `STATE_FILE` | `data/state.json` | Snapshot so a hub restart keeps the board. Empty disables it |
 
