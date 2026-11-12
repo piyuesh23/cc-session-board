@@ -146,6 +146,7 @@
 
   const STATE_WORD = { needs_input: 'NEEDS INPUT', working: 'WORKING', done: 'DONE', stale: 'STALE' };
   const LONG_PRESS_MS = 600;
+  const WATCHDOG_MS = 40e3;  // the hub pings every 15s; silence this long means the socket is dead
   const IDLE_DIM_MS = 30 * 60e3;
   const TOUCH_WAKE_MS = 60e3;
   const SHIFTS = [[0, 0], [3, 2], [-2, 3], [-3, -2], [2, -3]];
@@ -161,6 +162,8 @@
   let lastTouch = 0;
   let quiet = [23 * 60, 7 * 60];
   let audio = null;
+  let es = null;             // the live stream
+  let lastFrame = 0;         // when the hub last said anything (payload or ping)
 
   function span(ms) {
     const s = Math.max(0, Math.floor(ms / 1000));
@@ -306,6 +309,11 @@
     const touched = Date.now() - lastTouch < TOUCH_WAKE_MS;
     const idle = Date.now() - lastChange > IDLE_DIM_MS;
     document.body.classList.toggle('dim', !touched && (inQuietHours(now) || idle));
+
+    // iOS can leave an EventSource "open" that will never deliver another byte
+    // (app suspended, Wi-Fi or Tailscale reconnected). No ping for a while
+    // means exactly that, so start over.
+    if (es && Date.now() - lastFrame > WATCHDOG_MS) resume('silent stream');
   }
 
   function parseQuiet(text) {
@@ -348,15 +356,42 @@
 
   document.addEventListener('pointerdown', () => { lastTouch = Date.now(); unlockSound(); tick(); });
 
+  function alive() {
+    lastFrame = Date.now();
+    $('offline').hidden = true;
+  }
+
   function connect() {
-    const es = new EventSource('/live');
-    es.onopen = () => { $('offline').hidden = true; };
-    es.onmessage = (e) => { $('offline').hidden = true; render(JSON.parse(e.data)); };
+    if (es) es.close();
+    lastFrame = Date.now();  // give the new connection a full watchdog period
+    es = new EventSource('/live');
+    es.onopen = alive;
+    es.onmessage = (e) => { alive(); render(JSON.parse(e.data)); };
+    es.addEventListener('ping', alive);
     es.onerror = () => {
       $('offline').hidden = false;
-      if (es.readyState === EventSource.CLOSED) { es.close(); setTimeout(connect, 5000); }
+      if (es.readyState === EventSource.CLOSED) { es.close(); es = null; setTimeout(connect, 5000); }
     };
   }
+
+  // Catch up right away, then start a fresh stream. Used after a wake-up,
+  // a network change or a silent stream, when the old socket may be dead.
+  let resuming = false;
+  function resume(reason) {
+    if (resuming) return;
+    resuming = true;
+    console.log('board: resuming after ' + reason);
+    $('offline').hidden = false;
+    fetch('/sessions', { cache: 'no-store', signal: AbortSignal.timeout(10e3) })
+      .then((r) => r.json())
+      .then((p) => { alive(); render(p); })
+      .catch(() => {})
+      .finally(() => { resuming = false; connect(); });
+  }
+
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) resume('visible'); });
+  window.addEventListener('pageshow', (e) => { if (e.persisted) resume('pageshow'); });
+  window.addEventListener('online', () => resume('online'));
 
   window.addEventListener('resize', () => {
     for (const t of tiles.values()) fitName(t.parts.project);

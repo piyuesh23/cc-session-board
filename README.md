@@ -118,7 +118,7 @@ Hub, in `.env`:
 - **Tool events are throttled** to one every 5 seconds per session.
 - **Laptops sleep & roam:** a closed lid sends no event, so that session's tile goes grey after 10 minutes & drops off after 60. Off the tailnet the hook just gives up quietly; the board catches up on the next event.
 - **Idle notifications:** Claude Code sends an idle notification about a minute after a turn ends. The board keeps that session blue instead of turning it amber, otherwise every finished session would chime twice. An `auth_success` notification is informational too & leaves the tile as it is; any other notification type counts as a question.
-- **Live updates use SSE, not a websocket.** It needs no library on the Pi & Safari reconnects on its own.
+- **Live updates use SSE, not a websocket.** It needs no library on the Pi & Safari reconnects on its own when it notices a drop. iOS often doesn't notice (a suspended home screen app, a Wi-Fi or Tailscale reconnect), so the hub pings every 15 seconds & the page starts over, fetching the board first, after 40 seconds of silence or whenever it becomes visible or comes back online. The "Hub offline" pill shows while that happens.
 
 ## Not built yet
 

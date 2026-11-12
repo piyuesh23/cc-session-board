@@ -6,10 +6,11 @@ const { createHub, resolveHost, bindWarning } = require('../server');
 
 const SECRET = 'test-secret';
 
-async function withHub(fn) {
+async function withHub(fn, extra = {}) {
   const hub = createHub({
     port: 0, host: '127.0.0.1', secret: SECRET,
     staleMin: 10, hideMin: 60, quietHours: '23:00-07:00', stateFile: '',
+    ...extra,
   });
   await new Promise((resolve) => hub.server.listen(0, '127.0.0.1', resolve));
   const base = `http://127.0.0.1:${hub.server.address().port}`;
@@ -84,32 +85,42 @@ test('events show up on /sessions, ack and hide work', async () => {
   });
 });
 
-test('/live sends the board, then pushes changes', async () => {
+test('/live sends the board, pushes changes and pings so a dead socket can be told apart', async () => {
   await withHub(async ({ base, post }) => {
     const res = await fetch(base + '/live');
     assert.match(res.headers.get('content-type'), /text\/event-stream/);
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
     let buffer = '';
-    const nextPayload = async () => {
+    // One SSE frame: { event, data }. A frame without an event line is a board payload.
+    const nextFrame = async () => {
       for (;;) {
-        const hit = /data: (.*)\n\n/.exec(buffer);
-        if (hit) {
-          buffer = buffer.slice(hit.index + hit[0].length);
-          return JSON.parse(hit[1]);
+        const end = buffer.indexOf('\n\n');
+        if (end >= 0) {
+          const lines = buffer.slice(0, end).split('\n');
+          buffer = buffer.slice(end + 2);
+          const field = (name) => lines.filter((l) => l.startsWith(name + ': ')).map((l) => l.slice(name.length + 2)).join('\n');
+          if (!field('data')) continue; // the initial "retry:" line
+          return { event: field('event') || 'message', data: JSON.parse(field('data')) };
         }
         const { value, done } = await reader.read();
         if (done) throw new Error('stream ended');
         buffer += decoder.decode(value, { stream: true });
       }
     };
+    const nextOf = async (event) => {
+      for (;;) {
+        const frame = await nextFrame();
+        if (frame.event === event) return frame.data;
+      }
+    };
 
-    assert.equal((await nextPayload()).sessions.length, 0);
+    assert.equal((await nextOf('message')).sessions.length, 0);
     await post('/event', { session_id: 'a', event: 'prompt', project: 'demo' });
-    const pushed = await nextPayload();
-    assert.equal(pushed.sessions[0].state, 'working');
+    assert.equal((await nextOf('message')).sessions[0].state, 'working');
+    assert.deepEqual(await nextOf('ping'), {});
     await reader.cancel();
-  });
+  }, { keepAliveMs: 50 });
 });
 
 test('the board page is served', async () => {

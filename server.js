@@ -5,7 +5,7 @@
 //   POST /event     hook events from Claude Code (needs x-board-secret)
 //   POST /vitals    devbox CPU / RAM (needs x-board-secret)
 //   GET  /sessions  current board as JSON
-//   GET  /live      same payload pushed over Server-Sent Events
+//   GET  /live      same payload pushed over Server-Sent Events, plus a ping every 15s
 //   POST /ack       board tap: acknowledge a tile
 //   POST /hide      board long press: hide a tile until its next event
 //   GET  /          the board page
@@ -247,11 +247,12 @@ function createHub(config = readConfig()) {
   });
 
   // Stale / auto-hide transitions happen with no incoming event, so re-check
-  // on a timer. The comment line doubles as an SSE keep-alive.
+  // on a timer. The ping is a named event, not a comment, so the page can see
+  // it and tell a quiet board from a dead socket (iOS drops them silently).
   const ticker = setInterval(() => {
-    for (const res of clients) res.write(': keep-alive\n\n');
+    for (const res of clients) res.write('event: ping\ndata: {}\n\n');
     broadcast();
-  }, 15e3);
+  }, config.keepAliveMs || 15e3);
   ticker.unref();
 
   server.on('close', () => {
