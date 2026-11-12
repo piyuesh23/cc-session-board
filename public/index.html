@@ -168,9 +168,12 @@
 
   // Shrink a project name until it fits on one line; below 13px it is cut with an ellipsis.
   function fitName(el) {
+    // Measure the text itself: scrollWidth is rounded & misses sub-pixel overflow.
+    const text = document.createRange();
+    text.selectNodeContents(el);
     let size = 22;
     el.style.fontSize = size + 'px';
-    while (size > 13 && el.scrollWidth > el.clientWidth) {
+    while (size > 13 && text.getBoundingClientRect().width > el.getBoundingClientRect().width) {
       size -= 1;
       el.style.fontSize = size + 'px';
     }
