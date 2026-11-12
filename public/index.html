@@ -1,0 +1,362 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Sessions">
+<meta name="theme-color" content="#000000">
+<link rel="icon" href="data:,">
+<title>Session Board</title>
+<style>
+  :root {
+    --bg: #000;
+    --panel: #17171a;
+    --text: #f4f4f5;
+    --muted: #8e8e96;
+    --amber: #f5a623;
+    --amber-seen: #b67a14;
+    --amber-ink: #1b1200;
+    --green: #1e7b40;
+    --blue: #1d5fc4;
+    --grey: #232327;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    height: 100%; margin: 0; overflow: hidden;
+    background: var(--bg); color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    -webkit-user-select: none; user-select: none;
+    -webkit-touch-callout: none; -webkit-tap-highlight-color: transparent;
+    touch-action: manipulation;
+  }
+  #app {
+    position: fixed; inset: 0;
+    padding:
+      max(10px, env(safe-area-inset-top)) max(10px, env(safe-area-inset-right))
+      max(10px, env(safe-area-inset-bottom)) max(10px, env(safe-area-inset-left));
+    display: grid; grid-template-columns: clamp(104px, 15vw, 150px) 1fr; gap: 10px;
+    transition: transform 2s ease;
+  }
+
+  /* Left strip: clock, devbox vitals, counts */
+  .strip {
+    background: var(--panel); border-radius: 14px; padding: 12px;
+    display: flex; flex-direction: column; min-width: 0;
+  }
+  .clock { font-size: 30px; font-weight: 800; line-height: 1; font-variant-numeric: tabular-nums; }
+  .host { font-size: 12px; color: var(--muted); margin-top: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .label { font-size: 11px; letter-spacing: .08em; color: var(--muted); margin-top: 14px; }
+  .value { font-size: 18px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .counts { margin-top: auto; border-top: 1px solid #2c2c31; padding-top: 10px; }
+  .waiting { font-size: 20px; font-weight: 800; }
+  .waiting.on { color: var(--amber); }
+  .total { font-size: 12px; color: var(--muted); margin-top: 2px; }
+  #sound {
+    margin-top: 10px; font: inherit; font-size: 12px; font-weight: 700;
+    color: var(--text); background: #2c2c31; border: 0; border-radius: 8px; padding: 7px 6px;
+  }
+  #sound[hidden] { display: none; }
+
+  /* Session tiles */
+  .tiles { display: flex; gap: 10px; min-width: 0; overflow-x: auto; scrollbar-width: none; }
+  .tiles::-webkit-scrollbar { display: none; }
+  .tile {
+    flex: 1 1 0; min-width: 104px; border-radius: 14px; padding: 12px 10px;
+    display: flex; flex-direction: column; overflow: hidden;
+    container-type: inline-size;
+  }
+  .tile.needs_input { flex-grow: 1.6; min-width: 160px; background: var(--amber); color: var(--amber-ink); }
+  .tile.needs_input.acked { background: var(--amber-seen); }
+  .tile.working { background: var(--green); }
+  .tile.done { background: var(--blue); }
+  .tile.stale { background: var(--grey); color: var(--muted); }
+  .tile.needs_input:not(.acked) { animation: pulse 1s ease-in-out infinite; }
+  @keyframes pulse { 50% { filter: brightness(1.22); } }
+  @media (prefers-reduced-motion: reduce) { .tile.needs_input:not(.acked) { animation: none; } }
+
+  .state { font-size: 15px; font-size: clamp(13px, 11cqw, 20px); font-weight: 800; letter-spacing: .04em; white-space: nowrap; }
+  .timer {
+    font-size: 44px; font-size: clamp(36px, 30cqw, 64px); font-weight: 800; line-height: 1.05;
+    margin-top: 4px; font-variant-numeric: tabular-nums; white-space: nowrap;
+  }
+  /* Font size is set by fitName() so a long name shrinks before it is cut. */
+  .project {
+    font-size: 20px; font-weight: 800; line-height: 1.15; margin-top: 10px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .branch { font-size: 13px; opacity: .78; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .body {
+    font-size: 15px; line-height: 1.25; margin-top: 10px; overflow-wrap: anywhere;
+    display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden;
+  }
+  .meta { margin-top: auto; padding-top: 6px; font-size: 12px; opacity: .78; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .empty { margin: auto; color: var(--muted); font-size: 20px; font-weight: 700; }
+
+  #offline {
+    position: fixed; left: 50%; top: max(8px, env(safe-area-inset-top)); transform: translateX(-50%);
+    background: #3a3a40; color: var(--text); font-size: 13px; font-weight: 700;
+    padding: 6px 14px; border-radius: 999px; z-index: 3;
+  }
+  #offline[hidden] { display: none; }
+  #dim { position: fixed; inset: 0; background: #000; opacity: 0; pointer-events: none; transition: opacity 1.5s; z-index: 2; }
+  body.dim #dim { opacity: .8; }
+
+  /* Fallback when the phone is upright: one column */
+  @media (orientation: portrait) {
+    #app { grid-template-columns: 1fr; grid-template-rows: auto 1fr; }
+    .strip { flex-direction: row; flex-wrap: wrap; align-items: baseline; gap: 4px 16px; }
+    .label { margin-top: 0; }
+    .counts { margin: 0 0 0 auto; border: 0; padding: 0; text-align: right; }
+    .tiles { flex-direction: column; overflow: hidden auto; }
+    .tile, .tile.needs_input { flex: 0 0 auto; min-width: 0; }
+    .meta { margin-top: 8px; }
+  }
+</style>
+</head>
+<body>
+<div id="app">
+  <aside class="strip">
+    <div class="clock" id="clock">--:--</div>
+    <div class="host" id="host">devbox</div>
+    <div class="label">CPU</div>
+    <div class="value" id="cpu">—</div>
+    <div class="label">RAM</div>
+    <div class="value" id="ram">—</div>
+    <button id="sound" type="button">Tap for sound</button>
+    <div class="counts">
+      <div class="waiting" id="waiting">0 waiting</div>
+      <div class="total" id="total">0 sessions</div>
+    </div>
+  </aside>
+  <main class="tiles" id="tiles"></main>
+</div>
+<div id="offline" hidden>Hub offline, reconnecting</div>
+<div id="dim"></div>
+
+<script>
+(() => {
+  'use strict';
+
+  const STATE_WORD = { needs_input: 'NEEDS INPUT', working: 'WORKING', done: 'DONE', stale: 'STALE' };
+  const LONG_PRESS_MS = 600;
+  const IDLE_DIM_MS = 30 * 60e3;
+  const TOUCH_WAKE_MS = 60e3;
+  const SHIFTS = [[0, 0], [3, 2], [-2, 3], [-3, -2], [2, -3]];
+
+  const $ = (id) => document.getElementById(id);
+  const tilesEl = $('tiles');
+  const tiles = new Map();   // session id -> { el, parts, session }
+
+  let clockOffset = 0;       // hub clock minus this device's clock
+  let known = null;          // ids already alerted on; null until the first payload
+  let lastPrint = '';
+  let lastChange = Date.now();
+  let lastTouch = 0;
+  let quiet = [23 * 60, 7 * 60];
+  let audio = null;
+
+  function span(ms) {
+    const s = Math.max(0, Math.floor(ms / 1000));
+    if (s < 60) return s + 's';
+    const m = Math.floor(s / 60);
+    if (m < 60) return m + 'm';
+    return Math.floor(m / 60) + 'h' + String(m % 60).padStart(2, '0');
+  }
+
+  // Shrink a project name until it fits on one line; below 13px it is cut with an ellipsis.
+  function fitName(el) {
+    let size = 22;
+    el.style.fontSize = size + 'px';
+    while (size > 13 && el.scrollWidth > el.clientWidth) {
+      size -= 1;
+      el.style.fontSize = size + 'px';
+    }
+  }
+
+  function bodyText(s) {
+    if (s.state === 'working') {
+      if (!s.tool) return 'Thinking';
+      return s.target ? s.tool + ' · ' + s.target : s.tool;
+    }
+    if (s.state === 'stale') return 'No recent events';
+    return s.message || (s.state === 'needs_input' ? 'Waiting for you' : 'Turn finished');
+  }
+
+  function makeTile(id) {
+    const el = document.createElement('section');
+    const parts = {};
+    for (const name of ['state', 'timer', 'project', 'branch', 'body', 'meta']) {
+      parts[name] = document.createElement('div');
+      parts[name].className = name;
+      el.appendChild(parts[name]);
+    }
+
+    // Tap = acknowledge, long press = hide until the next event.
+    let timer = null, start = null;
+    const cancel = () => { clearTimeout(timer); timer = null; start = null; };
+    el.addEventListener('pointerdown', (e) => {
+      start = [e.clientX, e.clientY];
+      timer = setTimeout(() => { timer = null; start = null; post('/hide', id); }, LONG_PRESS_MS);
+    });
+    el.addEventListener('pointermove', (e) => {
+      if (start && Math.hypot(e.clientX - start[0], e.clientY - start[1]) > 12) cancel();
+    });
+    el.addEventListener('pointerup', () => {
+      if (timer) { cancel(); post('/ack', id); }
+    });
+    el.addEventListener('pointercancel', cancel);
+    el.addEventListener('contextmenu', (e) => e.preventDefault());
+
+    return { el, parts, session: null };
+  }
+
+  function post(path, id) {
+    fetch(path, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ id }),
+    }).catch(() => {});
+  }
+
+  function render(p) {
+    clockOffset = p.now - Date.now();
+    if (p.config && p.config.quietHours) quiet = parseQuiet(p.config.quietHours) || quiet;
+
+    const seen = new Set();
+    for (const s of p.sessions) {
+      seen.add(s.id);
+      let t = tiles.get(s.id);
+      if (!t) { t = makeTile(s.id); tiles.set(s.id, t); }
+      t.session = s;
+      t.el.className = 'tile ' + s.state + (s.acked ? ' acked' : '');
+      t.parts.state.textContent = STATE_WORD[s.state] + (s.state === 'needs_input' && s.acked ? ' ✓' : '');
+      t.parts.project.textContent = s.project;
+      t.parts.branch.textContent = s.branch;
+      t.parts.body.textContent = bodyText(s);
+      t.parts.meta.textContent = s.events + (s.events === 1 ? ' event' : ' events');
+      tilesEl.appendChild(t.el);            // re-append keeps hub order
+    }
+    for (const [id, t] of tiles) {
+      if (!seen.has(id)) { t.el.remove(); tiles.delete(id); }
+    }
+
+    for (const t of tiles.values()) fitName(t.parts.project);
+
+    let empty = tilesEl.querySelector('.empty');
+    if (!p.sessions.length && !empty) {
+      empty = document.createElement('div');
+      empty.className = 'empty';
+      empty.textContent = 'No sessions running';
+      tilesEl.appendChild(empty);
+    } else if (p.sessions.length && empty) {
+      empty.remove();
+    }
+
+    $('waiting').textContent = p.counts.waiting + ' waiting';
+    $('waiting').classList.toggle('on', p.counts.waiting > 0);
+    $('total').textContent = p.counts.total + (p.counts.total === 1 ? ' session' : ' sessions');
+
+    const v = p.vitals;
+    $('host').textContent = (v && v.host) || 'devbox';
+    $('cpu').textContent = v && v.cpu !== null ? Math.round(v.cpu) + '%' : '—';
+    $('ram').textContent = v && v.ramUsedGb !== null && v.ramTotalGb !== null
+      ? Math.round(v.ramUsedGb) + '/' + Math.round(v.ramTotalGb) + ' GB' : '—';
+
+    // Chime once for each session that newly needs input.
+    const waitingNow = new Set(p.sessions.filter((s) => s.state === 'needs_input' && !s.acked).map((s) => s.id));
+    if (known) {
+      for (const id of waitingNow) {
+        if (!known.has(id)) { chime(); break; }
+      }
+    }
+    known = waitingNow;
+
+    const print = JSON.stringify(p.sessions.map((s) => [s.id, s.state, s.events, s.acked]));
+    if (print !== lastPrint) { lastPrint = print; lastChange = Date.now(); }
+
+    tick();
+  }
+
+  function tick() {
+    const now = new Date();
+    $('clock').textContent =
+      String(now.getHours()).padStart(2, '0') + ':' + String(now.getMinutes()).padStart(2, '0');
+
+    const hubNow = Date.now() + clockOffset;
+    for (const t of tiles.values()) t.parts.timer.textContent = span(hubNow - t.session.since);
+
+    const touched = Date.now() - lastTouch < TOUCH_WAKE_MS;
+    const idle = Date.now() - lastChange > IDLE_DIM_MS;
+    document.body.classList.toggle('dim', !touched && (inQuietHours(now) || idle));
+  }
+
+  function parseQuiet(text) {
+    const m = /^(\d{1,2}):(\d{2})-(\d{1,2}):(\d{2})$/.exec(text);
+    return m ? [Number(m[1]) * 60 + Number(m[2]), Number(m[3]) * 60 + Number(m[4])] : null;
+  }
+
+  function inQuietHours(date) {
+    const mins = date.getHours() * 60 + date.getMinutes();
+    const [from, to] = quiet;
+    return from <= to ? mins >= from && mins < to : mins >= from || mins < to;
+  }
+
+  // iOS only allows sound after a touch, so the first tap unlocks it.
+  function unlockSound() {
+    if (audio) return;
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    if (!Ctx) return;
+    audio = new Ctx();
+    audio.resume();
+    $('sound').hidden = true;
+  }
+
+  function chime() {
+    if (!audio || inQuietHours(new Date())) return;
+    const at = audio.currentTime;
+    [[880, 0], [1175, 0.16]].forEach(([freq, delay]) => {
+      const osc = audio.createOscillator();
+      const gain = audio.createGain();
+      osc.type = 'sine';
+      osc.frequency.value = freq;
+      gain.gain.setValueAtTime(0.0001, at + delay);
+      gain.gain.exponentialRampToValueAtTime(0.5, at + delay + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.0001, at + delay + 0.45);
+      osc.connect(gain).connect(audio.destination);
+      osc.start(at + delay);
+      osc.stop(at + delay + 0.5);
+    });
+  }
+
+  document.addEventListener('pointerdown', () => { lastTouch = Date.now(); unlockSound(); tick(); });
+
+  function connect() {
+    const es = new EventSource('/live');
+    es.onopen = () => { $('offline').hidden = true; };
+    es.onmessage = (e) => { $('offline').hidden = true; render(JSON.parse(e.data)); };
+    es.onerror = () => {
+      $('offline').hidden = false;
+      if (es.readyState === EventSource.CLOSED) { es.close(); setTimeout(connect, 5000); }
+    };
+  }
+
+  window.addEventListener('resize', () => {
+    for (const t of tiles.values()) fitName(t.parts.project);
+  });
+
+  connect();
+  setInterval(tick, 1000);
+
+  // Nudge the layout a few pixels every 3 minutes so static parts do not burn into the OLED.
+  let shift = 0;
+  setInterval(() => {
+    shift = (shift + 1) % SHIFTS.length;
+    $('app').style.transform = 'translate(' + SHIFTS[shift][0] + 'px,' + SHIFTS[shift][1] + 'px)';
+  }, 3 * 60e3);
+})();
+</script>
+</body>
+</html>

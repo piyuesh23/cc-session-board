@@ -1,0 +1,16 @@
+[Unit]
+Description=cc-session-board hub
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/cc-session-board
+EnvironmentFile=/home/pi/cc-session-board/.env
+ExecStart=/usr/bin/env node server.js
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

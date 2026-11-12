@@ -1,0 +1,13 @@
+[Unit]
+Description=cc-session-board devbox vitals
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/env python3 %h/cc-session-board/scripts/push_vitals.py --loop 30
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target

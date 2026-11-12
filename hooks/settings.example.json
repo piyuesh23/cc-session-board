@@ -1,0 +1,22 @@
+{
+  "hooks": {
+    "SessionStart": [
+      { "hooks": [{ "type": "command", "command": "python3 ~/cc-session-board/hooks/cc_board_hook.py", "async": true }] }
+    ],
+    "SessionEnd": [
+      { "hooks": [{ "type": "command", "command": "python3 ~/cc-session-board/hooks/cc_board_hook.py", "timeout": 5 }] }
+    ],
+    "UserPromptSubmit": [
+      { "hooks": [{ "type": "command", "command": "python3 ~/cc-session-board/hooks/cc_board_hook.py", "async": true }] }
+    ],
+    "PostToolUse": [
+      { "matcher": "*", "hooks": [{ "type": "command", "command": "python3 ~/cc-session-board/hooks/cc_board_hook.py", "async": true }] }
+    ],
+    "Notification": [
+      { "hooks": [{ "type": "command", "command": "python3 ~/cc-session-board/hooks/cc_board_hook.py", "async": true }] }
+    ],
+    "Stop": [
+      { "hooks": [{ "type": "command", "command": "python3 ~/cc-session-board/hooks/cc_board_hook.py", "async": true }] }
+    ]
+  }
+}

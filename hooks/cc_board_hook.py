@@ -1,0 +1,169 @@
+#!/usr/bin/env python3
+"""Claude Code hook -> cc-session-board hub.
+
+Reads the hook JSON on stdin, posts a small event to the hub and exits 0.
+It never blocks or fails a Claude Code session: any error is swallowed.
+
+Config comes from the environment, or from ~/.config/cc-board/env:
+    CC_BOARD_URL=http://<pi-tailscale-ip>:8787
+    CC_BOARD_SECRET=<same value as BOARD_SECRET on the hub>
+"""
+
+import json
+import os
+import re
+import subprocess
+import sys
+import tempfile
+import time
+import urllib.request
+
+EVENTS = {
+    "SessionStart": "session_start",
+    "SessionEnd": "session_end",
+    "UserPromptSubmit": "prompt",
+    "PreToolUse": "tool",
+    "PostToolUse": "tool",
+    "Notification": "notification",
+    "Stop": "stop",
+}
+
+TOOL_THROTTLE_S = 5
+POST_TIMEOUT_S = 2
+
+
+def load_config():
+    cfg = {
+        "url": os.environ.get("CC_BOARD_URL", ""),
+        "secret": os.environ.get("CC_BOARD_SECRET", ""),
+    }
+    if cfg["url"] and cfg["secret"]:
+        return cfg
+    path = os.path.expanduser("~/.config/cc-board/env")
+    try:
+        with open(path, encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, value = line.split("=", 1)
+                value = value.strip().strip("'\"")
+                if key.strip() == "CC_BOARD_URL" and not cfg["url"]:
+                    cfg["url"] = value
+                elif key.strip() == "CC_BOARD_SECRET" and not cfg["secret"]:
+                    cfg["secret"] = value
+    except OSError:
+        pass
+    return cfg
+
+
+def git_branch(cwd):
+    """Current branch, or the short commit when HEAD is detached. Empty outside a repo."""
+    for args in (["branch", "--show-current"], ["rev-parse", "--short", "HEAD"]):
+        try:
+            out = subprocess.run(
+                ["git", "-C", cwd, *args], capture_output=True, text=True, timeout=1,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return ""
+        if out.returncode == 0 and out.stdout.strip():
+            return out.stdout.strip()
+    return ""
+
+
+def tool_target(tool_input, cwd):
+    """One short line saying what the tool is acting on."""
+    if not isinstance(tool_input, dict):
+        return ""
+    for key in ("file_path", "notebook_path", "path"):
+        value = tool_input.get(key)
+        if isinstance(value, str) and value:
+            return os.path.relpath(value, cwd) if cwd and os.path.isabs(value) else value
+    for key in ("command", "pattern", "url", "query", "description"):
+        value = tool_input.get(key)
+        if isinstance(value, str) and value:
+            return " ".join(value.split())[:120]
+    return ""
+
+
+def throttled(session_id):
+    """True when this session posted a tool event in the last few seconds."""
+    safe = re.sub(r"[^A-Za-z0-9_-]", "", session_id)[:64] or "unknown"
+    stamp = os.path.join(tempfile.gettempdir(), f"cc-board-{safe}.stamp")
+    now = time.time()
+    try:
+        if now - os.path.getmtime(stamp) < TOOL_THROTTLE_S:
+            return True
+    except OSError:
+        pass
+    try:
+        with open(stamp, "w", encoding="utf-8"):
+            pass
+    except OSError:
+        pass
+    return False
+
+
+def build_event(data):
+    event = EVENTS.get(data.get("hook_event_name"))
+    session_id = data.get("session_id")
+    if not event or not session_id:
+        return None
+
+    cwd = data.get("cwd") or ""
+    payload = {
+        "session_id": session_id,
+        "event": event,
+        "project": os.path.basename(cwd.rstrip("/")) or "unknown",
+    }
+
+    if event == "session_end":
+        return payload
+
+    if event == "tool":
+        if throttled(session_id):
+            return None
+        payload["tool"] = data.get("tool_name") or ""
+        payload["target"] = tool_target(data.get("tool_input"), cwd)
+    elif event == "notification":
+        payload["message"] = data.get("message") or ""
+        payload["notification_type"] = data.get("notification_type") or ""
+    elif event == "stop":
+        payload["message"] = data.get("last_assistant_message") or ""
+
+    if cwd:
+        payload["branch"] = git_branch(cwd)
+    return payload
+
+
+def main():
+    try:
+        data = json.load(sys.stdin)
+    except ValueError:
+        return
+    if not isinstance(data, dict):
+        return
+
+    cfg = load_config()
+    if not cfg["url"] or not cfg["secret"]:
+        return
+
+    payload = build_event(data)
+    if payload is None:
+        return
+
+    request = urllib.request.Request(
+        cfg["url"].rstrip("/") + "/event",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"content-type": "application/json", "x-board-secret": cfg["secret"]},
+        method="POST",
+    )
+    urllib.request.urlopen(request, timeout=POST_TIMEOUT_S).read()
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception:  # noqa: BLE001 - a board problem must never break a session
+        pass
+    sys.exit(0)

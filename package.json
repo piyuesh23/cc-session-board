@@ -1,0 +1,15 @@
+{
+  "name": "cc-session-board",
+  "version": "0.1.0",
+  "description": "A glanceable status board for Claude Code sessions, served from a Raspberry Pi to a spare phone.",
+  "private": true,
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test",
+    "simulate": "node scripts/simulate.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
