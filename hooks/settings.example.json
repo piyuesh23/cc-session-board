@@ -45,6 +45,18 @@
         ]
       }
     ],
+    "PermissionRequest": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 ~/cc-session-board/hooks/cc_board_permission.py",
+            "timeout": 180
+          }
+        ]
+      }
+    ],
     "Notification": [
       {
         "hooks": [

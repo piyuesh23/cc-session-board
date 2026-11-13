@@ -20,8 +20,9 @@ async function withHub(fn, extra = {}) {
       headers: { 'content-type': 'application/json', ...(secret ? { 'x-board-secret': secret } : {}) },
       body: typeof body === 'string' ? body : JSON.stringify(body),
     });
+  const get = (path, secret = SECRET) => fetch(base + path, { headers: secret ? { 'x-board-secret': secret } : {} });
   try {
-    await fn({ base, post });
+    await fn({ base, post, get, hub });
   } finally {
     hub.server.closeAllConnections();
     await new Promise((resolve) => hub.server.close(resolve));
@@ -153,5 +154,146 @@ test('the board page is served', async () => {
     const res = await fetch(base + '/');
     assert.equal(res.status, 200);
     assert.match(await res.text(), /Session Board/);
+  });
+});
+
+const ask = { session_id: 'a', project: 'demo', host: 'mac', branch: 'main', tool: 'Bash', target: 'npm test' };
+
+test('every permission route needs the secret', async () => {
+  await withHub(async ({ post, get, hub }) => {
+    assert.equal((await post('/permission', ask, '')).status, 401);
+    const id = hub.permissions.create(ask).id;
+    assert.equal((await get('/permissions', '')).status, 401);
+    assert.equal((await get(`/permission/${id}`, 'wrong')).status, 401);
+    assert.equal((await post(`/permission/${id}/decide`, { decision: 'allow' }, '')).status, 401);
+    assert.equal((await post(`/permission/${id}/cancel`, {}, '')).status, 401);
+    assert.deepEqual((await (await get(`/permission/${id}`)).json()), { ok: true, state: 'pending' });
+  });
+});
+
+test('a permission request is listed, marks the tile amber and only the count reaches the board', async () => {
+  await withHub(async ({ base, post, get }) => {
+    assert.equal((await post('/permission', { tool: 'Bash' })).status, 400);
+    const created = await (await post('/permission', ask)).json();
+    assert.equal(created.ok, true);
+    assert.match(created.id, /^[0-9a-f]{16}$/);
+
+    const list = await (await get('/permissions')).json();
+    assert.equal(list.ok, true);
+    assert.deepEqual(list.pending.map(({ createdAt, ...r }) => r), [{ id: created.id, ...ask }]);
+    assert.ok(Number.isFinite(list.pending[0].createdAt));
+
+    const board = await (await fetch(base + '/sessions')).json();
+    assert.equal(board.permissions, 1);
+    assert.equal(board.sessions[0].state, 'needs_input');
+    assert.equal(board.sessions[0].message, 'Allow Bash npm test?');
+    assert.doesNotMatch(JSON.stringify(board), new RegExp(created.id));
+  });
+});
+
+test('a long-poll wakes on decide; deciding twice is a conflict', async () => {
+  await withHub(async ({ post, get }) => {
+    const { id } = await (await post('/permission', ask)).json();
+    const started = Date.now();
+    const polled = get(`/permission/${id}?wait=10`).then((r) => r.json());
+    await new Promise((r) => setTimeout(r, 50));
+    assert.equal((await post(`/permission/${id}/decide`, { decision: 'maybe' })).status, 400);
+    assert.equal((await post(`/permission/${id}/decide`, { decision: 'deny', message: 'Not now' })).status, 200);
+    assert.deepEqual(await polled, { ok: true, state: 'deny', message: 'Not now' });
+    assert.ok(Date.now() - started < 5000, 'answered on the decision, not the timeout');
+
+    assert.equal((await post(`/permission/${id}/decide`, { decision: 'allow' })).status, 409);
+    assert.deepEqual(await (await get(`/permission/${id}?wait=10`)).json(), { ok: true, state: 'deny', message: 'Not now' });
+    assert.deepEqual((await (await get('/permissions')).json()).pending, []);
+  });
+});
+
+test('a long-poll returns pending when the wait runs out and cleans up on disconnect', async () => {
+  await withHub(async ({ base, post, get, hub }) => {
+    const { id } = await (await post('/permission', ask)).json();
+    assert.deepEqual(await (await get(`/permission/${id}?wait=1`)).json(), { ok: true, state: 'pending' });
+    assert.equal(hub.permissions.listeners.size, 0);
+
+    const abort = new AbortController();
+    const gone = fetch(base + `/permission/${id}?wait=30`, { headers: { 'x-board-secret': SECRET }, signal: abort.signal }).catch(() => null);
+    await new Promise((r) => setTimeout(r, 50));
+    assert.equal(hub.permissions.listeners.size, 1);
+    abort.abort();
+    await gone;
+    await new Promise((r) => setTimeout(r, 50));
+    assert.equal(hub.permissions.listeners.size, 0, 'a dropped long-poll leaves no listener');
+  });
+});
+
+test('unknown ids are a 404; cancel wakes the long-poll', async () => {
+  await withHub(async ({ post, get }) => {
+    assert.equal((await get('/permission/abcdef')).status, 404);
+    assert.equal((await post('/permission/abcdef/decide', { decision: 'allow' })).status, 404);
+    assert.equal((await post('/permission/abcdef/cancel', {})).status, 404);
+    assert.equal((await get('/permission/not-hex')).status, 404);
+
+    const { id } = await (await post('/permission', ask)).json();
+    const polled = get(`/permission/${id}?wait=10`).then((r) => r.json());
+    await new Promise((r) => setTimeout(r, 50));
+    assert.equal((await post(`/permission/${id}/cancel`, {})).status, 200);
+    assert.deepEqual(await polled, { ok: true, state: 'cancelled' });
+    assert.equal((await post(`/permission/${id}/decide`, { decision: 'allow' })).status, 409);
+  });
+});
+
+test('pending requests expire after 15 minutes', async () => {
+  const clock = { t: Date.now() };
+  await withHub(async ({ base, post, get, hub }) => {
+    const { id } = await (await post('/permission', ask)).json();
+    const polled = get(`/permission/${id}?wait=10`).then((r) => r.json());
+    await new Promise((r) => setTimeout(r, 50));
+    clock.t += 16 * 60e3;
+    hub.permissions.sweep(); // what the ticker does
+    assert.deepEqual(await polled, { ok: true, state: 'cancelled' });
+    assert.equal((await get(`/permission/${id}`)).status, 404);
+    assert.equal((await (await fetch(base + '/sessions')).json()).permissions, 0);
+  }, { now: () => clock.t });
+});
+
+test('the approve key can list and answer prompts, nothing else', async () => {
+  await withHub(async ({ post, get, hub }) => {
+    const KEY = 'phone-key';
+    assert.equal((await post('/permission', ask, KEY)).status, 401, 'cannot open a prompt');
+    assert.equal((await post('/event', { session_id: 'a', event: 'stop' }, KEY)).status, 401, 'cannot post events');
+    const id = hub.permissions.create(ask).id;
+    assert.equal((await get(`/permission/${id}`, KEY)).status, 401, 'cannot poll');
+    assert.equal((await post(`/permission/${id}/cancel`, {}, KEY)).status, 401, 'cannot cancel');
+    assert.equal((await get('/permissions', KEY)).status, 200);
+    assert.equal((await post(`/permission/${id}/decide`, { decision: 'allow' }, KEY)).status, 200);
+    assert.equal((await get('/permissions', 'not-the-key')).status, 401);
+  }, { approveSecret: 'phone-key' });
+});
+
+test('without APPROVE_SECRET only BOARD_SECRET answers', async () => {
+  await withHub(async ({ post, get }) => {
+    assert.equal((await get('/permissions', '')).status, 401, 'an empty key never matches an unset one');
+    assert.equal((await post('/permission/abcdef/decide', { decision: 'allow' }, '')).status, 401);
+  });
+});
+
+test('a question is listed with its options, shown on the tile and answered by label', async () => {
+  await withHub(async ({ base, post, get }) => {
+    const questions = [
+      { question: 'Ship it today?', header: 'Release', options: [{ label: 'Yes' }, { label: 'Wait' }] },
+      { question: 'Notify who?', header: 'Notify', multiSelect: true, options: [{ label: 'Team' }, { label: 'Ops' }] },
+    ];
+    const { id } = await (await post('/permission', { ...ask, tool: 'AskUserQuestion', target: '', questions })).json();
+    const [req] = (await (await get('/permissions')).json()).pending;
+    assert.equal(req.questions.length, 2);
+    assert.equal(req.questions[1].options[1].label, 'Ops');
+    const board = await (await fetch(base + '/sessions')).json();
+    assert.equal(board.sessions[0].message, 'Ship it today? (+1 more)');
+    assert.doesNotMatch(JSON.stringify(board), /Notify who/, 'the options stay behind the key');
+
+    const polled = get(`/permission/${id}?wait=10`).then((r) => r.json());
+    await new Promise((r) => setTimeout(r, 50));
+    assert.equal((await post(`/permission/${id}/decide`, { decision: 'allow', answers: ['Maybe', ['Team']] })).status, 400);
+    assert.equal((await post(`/permission/${id}/decide`, { decision: 'allow', answers: ['Wait', ['Ops', 'Team']] })).status, 200);
+    assert.deepEqual(await polled, { ok: true, state: 'allow', answers: [[1], [0, 1]] });
   });
 });

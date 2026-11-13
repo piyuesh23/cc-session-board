@@ -63,12 +63,9 @@ def redact(text):
     return text
 
 
-def load_config():
-    cfg = {
-        "url": os.environ.get("CC_BOARD_URL", ""),
-        "secret": os.environ.get("CC_BOARD_SECRET", ""),
-        "host": os.environ.get("CC_BOARD_HOST", ""),
-    }
+def env_file():
+    """KEY=value pairs from ~/.config/cc-board/env, or {} when there is none."""
+    values = {}
     path = os.path.expanduser("~/.config/cc-board/env")
     try:
         with open(path, encoding="utf-8") as fh:
@@ -77,15 +74,29 @@ def load_config():
                 if not line or line.startswith("#") or "=" not in line:
                     continue
                 key, value = line.split("=", 1)
-                value = value.strip().strip("'\"")
-                if key.strip() == "CC_BOARD_URL" and not cfg["url"]:
-                    cfg["url"] = value
-                elif key.strip() == "CC_BOARD_SECRET" and not cfg["secret"]:
-                    cfg["secret"] = value
-                elif key.strip() == "CC_BOARD_HOST" and not cfg["host"]:
-                    cfg["host"] = value
+                values[key.strip()] = value.strip().strip("'\"")
     except OSError:
         pass
+    return values
+
+
+def setting(name, file_values=None):
+    """The environment wins over the env file, so one session can override it."""
+    value = os.environ.get(name, "")
+    if value:
+        return value
+    if file_values is None:
+        file_values = env_file()
+    return file_values.get(name, "")
+
+
+def load_config():
+    values = env_file()
+    cfg = {
+        "url": setting("CC_BOARD_URL", values),
+        "secret": setting("CC_BOARD_SECRET", values),
+        "host": setting("CC_BOARD_HOST", values),
+    }
     if not cfg["host"]:
         # "Piyueshs-MacBook-Pro.local" -> "Piyueshs-MacBook-Pro"
         cfg["host"] = socket.gethostname().split(".")[0]

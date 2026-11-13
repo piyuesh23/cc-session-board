@@ -61,7 +61,11 @@
     margin-top: 10px; font: inherit; font-size: 12px; font-weight: 700;
     color: var(--text); background: #2c2c31; border: 0; border-radius: 8px; padding: 7px 6px;
   }
-  #sound[hidden], #vitals[hidden], #usage[hidden], .limit[hidden] { display: none; }
+  #pair {
+    margin-top: 8px; font: inherit; font-size: 12px; font-weight: 700;
+    color: var(--text); background: #2c2c31; border: 0; border-radius: 8px; padding: 7px 6px;
+  }
+  #pair[hidden], #sound[hidden], #vitals[hidden], #usage[hidden], .limit[hidden] { display: none; }
 
   /* Claude subscription windows: used share of each limit, coloured by how close it is */
   .limit { margin-top: 8px; }
@@ -110,6 +114,26 @@
   }
   .meta { margin-top: auto; padding-top: 6px; font-size: 12px; opacity: .78; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .empty { margin: auto; color: var(--muted); font-size: 20px; font-weight: 700; }
+
+  /* Answering a waiting prompt from the board: Allow / Deny, or the question's options */
+  .ask { margin-top: 10px; display: flex; flex-direction: column; gap: 6px; }
+  .ask[hidden] { display: none; }
+  .ask-step { font-size: 11px; font-weight: 800; letter-spacing: .06em; text-transform: uppercase; opacity: .75; }
+  .ask-q { font-size: 14px; font-weight: 700; line-height: 1.2; overflow-wrap: anywhere; }
+  .ask-buttons { display: flex; flex-wrap: wrap; gap: 6px; }
+  .ask button {
+    flex: 1 1 auto; min-height: 44px; min-width: 64px; padding: 6px 10px;
+    font: inherit; font-size: 15px; font-weight: 800; line-height: 1.1;
+    border: 0; border-radius: 10px; color: var(--amber-ink); background: rgba(255, 255, 255, .55);
+    overflow-wrap: anywhere;
+  }
+  .ask button.go { background: var(--amber-ink); color: var(--amber); }
+  .ask button.picked { background: var(--amber-ink); color: var(--amber); outline: 2px solid #fff; }
+  .ask button.quiet { flex-grow: 0; background: transparent; box-shadow: inset 0 0 0 2px rgba(27, 18, 0, .45); }
+  .ask button:disabled { opacity: .5; }
+  .ask-note { font-size: 12px; font-weight: 700; min-height: 1em; }
+  .tile.asking .body { -webkit-line-clamp: 2; }
+  .tile.asking:not(.acked) { animation: none; }
 
   #offline {
     position: fixed; left: 50%; top: max(8px, env(safe-area-inset-top)); transform: translateX(-50%);
@@ -160,6 +184,7 @@
       </div>
     </div>
     <button id="sound" type="button">Tap for sound</button>
+    <button id="pair" type="button" hidden>Pair to answer</button>
     <div class="counts">
       <div class="waiting" id="waiting">0 waiting</div>
       <div class="total" id="total">0 sessions</div>
@@ -197,6 +222,15 @@
   let es = null;             // the live stream
   let lastFrame = 0;         // when the hub last said anything (payload or ping)
   let usage = null;          // last subscription usage from the hub
+  let pendingCount = 0;      // prompts waiting for a remote answer, from the hub
+  let prompts = new Map();   // session id -> waiting prompt (only with the approve key)
+  let promptsFetch = null;   // in-flight /permissions request
+
+  // The approve key lets this page answer prompts. It stays on this device only.
+  const KEY_NAME = 'cc-board-approve-key';
+  function readKey() { try { return localStorage.getItem(KEY_NAME) || ''; } catch { return ''; } }
+  function saveKey(v) { try { v ? localStorage.setItem(KEY_NAME, v) : localStorage.removeItem(KEY_NAME); } catch {} }
+  let approveKey = readKey();
 
   function span(ms) {
     const s = Math.max(0, Math.floor(ms / 1000));
@@ -257,16 +291,18 @@
   function makeTile(id) {
     const el = document.createElement('section');
     const parts = {};
-    for (const name of ['state', 'timer', 'project', 'branch', 'body', 'meta']) {
+    for (const name of ['state', 'timer', 'project', 'branch', 'body', 'ask', 'meta']) {
       parts[name] = document.createElement('div');
       parts[name].className = name;
       el.appendChild(parts[name]);
     }
+    parts.ask.hidden = true;
 
     // Tap = acknowledge, long press = hide until the next event.
     let timer = null, start = null;
     const cancel = () => { clearTimeout(timer); timer = null; start = null; };
     el.addEventListener('pointerdown', (e) => {
+      if (e.target.closest('.ask')) return;  // the buttons do their own thing
       start = [e.clientX, e.clientY];
       timer = setTimeout(() => { timer = null; start = null; post('/hide', id); }, LONG_PRESS_MS);
     });
@@ -279,7 +315,205 @@
     el.addEventListener('pointercancel', cancel);
     el.addEventListener('contextmenu', (e) => e.preventDefault());
 
-    return { el, parts, session: null };
+    return { el, parts, session: null, prompt: null, picks: null, step: 0, busy: false };
+  }
+
+  // ---- Answering prompts -------------------------------------------------
+
+  function keyed(path, init = {}) {
+    return fetch(path, {
+      ...init,
+      cache: 'no-store',
+      headers: { 'content-type': 'application/json', 'x-board-secret': approveKey },
+      signal: AbortSignal.timeout(10e3),
+    });
+  }
+
+  function forgetKey() {
+    approveKey = '';
+    saveKey('');
+    prompts = new Map();
+    renderPrompts();
+  }
+
+  // Fetch the waiting prompts whenever the hub says there are some. The live
+  // stream only carries the count: the prompts themselves need the key.
+  function refreshPrompts() {
+    $('pair').hidden = !!approveKey || !pendingCount;
+    if (!approveKey || (!pendingCount && !prompts.size)) {
+      if (prompts.size) { prompts = new Map(); renderPrompts(); }
+      return;
+    }
+    if (promptsFetch) { promptsFetch.again = true; return; }
+    const job = { again: false };
+    promptsFetch = job;
+    keyed('/permissions')
+      .then((r) => {
+        if (r.status === 401) { forgetKey(); throw new Error('key rejected'); }
+        return r.json();
+      })
+      .then((body) => {
+        const next = new Map();
+        for (const req of body.pending || []) next.set(req.session_id, req);  // oldest first, so the newest wins
+        prompts = next;
+        renderPrompts();
+      })
+      .catch(() => {})
+      .finally(() => {
+        promptsFetch = null;
+        if (job.again) refreshPrompts();
+        $('pair').hidden = !!approveKey || !pendingCount;
+      });
+  }
+
+  function renderPrompts() {
+    for (const t of tiles.values()) renderAsk(t, prompts.get(t.session.id) || null);
+  }
+
+  function button(text, cls, onTap) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.textContent = text;
+    if (cls) b.className = cls;
+    b.addEventListener('click', (e) => { e.stopPropagation(); lastTouch = Date.now(); onTap(); });
+    return b;
+  }
+
+  // Draw the answer area for one tile. A prompt keeps its half-made choices
+  // across re-renders until it is answered or goes away.
+  function renderAsk(t, req) {
+    const show = !!req && t.session.state === 'needs_input';
+    if (!show) {
+      if (!t.prompt && t.parts.ask.hidden) return;
+      t.prompt = null;
+      t.drawn = '';
+      t.parts.ask.hidden = true;
+      t.parts.ask.textContent = '';
+      t.el.classList.remove('asking');
+      return;
+    }
+    if (!t.prompt || t.prompt.id !== req.id) {
+      t.prompt = req;
+      t.step = 0;
+      t.picks = (req.questions || []).map(() => []);
+      t.busy = false;
+      t.note = '';
+    }
+    // Redraw only on a real change, so a payload arriving mid-tap can't swap
+    // the button out from under a finger.
+    const drawn = JSON.stringify([req.id, t.step, t.picks, t.busy, t.note]);
+    if (drawn === t.drawn) return;
+    t.drawn = drawn;
+    t.el.classList.add('asking');
+    t.parts.ask.hidden = false;
+    t.parts.ask.textContent = '';
+    const row = document.createElement('div');
+    row.className = 'ask-buttons';
+
+    if (!req.questions) {
+      row.append(
+        button('Allow', 'go', () => answer(t, { decision: 'allow' })),
+        button('Deny', '', () => answer(t, { decision: 'deny', message: 'Denied from the board' })),
+      );
+      t.parts.ask.append(row);
+    } else {
+      const qs = req.questions;
+      const q = qs[t.step];
+      const picks = t.picks[t.step];
+      const step = document.createElement('div');
+      step.className = 'ask-step';
+      step.textContent = (qs.length > 1 ? (t.step + 1) + '/' + qs.length + ' · ' : '') + (q.header || 'Question') + (q.multiSelect ? ' · pick any' : '');
+      const text = document.createElement('div');
+      text.className = 'ask-q';
+      text.textContent = q.question;
+      for (const o of q.options) {
+        const b = button(o.label, picks.includes(o.label) ? 'picked' : '', () => pick(t, o.label));
+        if (o.description) b.title = o.description;
+        row.append(b);
+      }
+      const last = t.step === qs.length - 1;
+      const controls = document.createElement('div');
+      controls.className = 'ask-buttons';
+      if (t.step > 0) controls.append(button('Back', 'quiet', () => { t.step -= 1; renderAsk(t, t.prompt); }));
+      if (q.multiSelect) {
+        const next = button(last ? 'Send' : 'Next', 'go', () => advance(t));
+        next.disabled = !picks.length;
+        controls.append(next);
+      }
+      controls.append(button('Skip', 'quiet', () => answer(t, { decision: 'deny', message: 'The user skipped this question from the board. Ask again in the terminal if you still need it.' })));
+      t.parts.ask.append(step, text, row, controls);
+    }
+
+    const note = document.createElement('div');
+    note.className = 'ask-note';
+    note.textContent = t.note || '';
+    t.parts.ask.append(note);
+    for (const b of t.parts.ask.querySelectorAll('button')) if (t.busy) b.disabled = true;
+  }
+
+  function pick(t, label) {
+    const q = t.prompt.questions[t.step];
+    const picks = t.picks[t.step];
+    if (q.multiSelect) {
+      const i = picks.indexOf(label);
+      i < 0 ? picks.push(label) : picks.splice(i, 1);
+      renderAsk(t, t.prompt);
+    } else {
+      t.picks[t.step] = [label];
+      advance(t);
+    }
+  }
+
+  function advance(t) {
+    if (t.step < t.prompt.questions.length - 1) {
+      t.step += 1;
+      renderAsk(t, t.prompt);
+      return;
+    }
+    const answers = t.prompt.questions.map((q, i) => (q.multiSelect ? t.picks[i] : t.picks[i][0]));
+    answer(t, { decision: 'allow', answers });
+  }
+
+  function answer(t, body) {
+    const req = t.prompt;
+    if (!req || t.busy) return;
+    t.busy = true;
+    t.note = 'Sending…';
+    renderAsk(t, req);
+    keyed('/permission/' + req.id + '/decide', { method: 'POST', body: JSON.stringify(body) })
+      .then(async (r) => {
+        if (r.status === 401) { forgetKey(); return; }
+        const out = await r.json().catch(() => ({}));
+        if (r.ok) {
+          t.note = body.decision === 'allow' ? 'Sent ✓' : 'Denied ✓';
+          post('/ack', t.session.id);
+        } else if (r.status === 409 || r.status === 404) {
+          t.note = 'Already answered or timed out';
+        } else {
+          t.busy = false;
+          t.note = out.error || 'Failed, try again';
+        }
+      })
+      .catch(() => { t.busy = false; t.note = 'Hub unreachable, try again'; })
+      .finally(() => { if (t.prompt === req) renderAsk(t, req); refreshPrompts(); });
+  }
+
+  // Pair once: paste the hub's APPROVE_SECRET (or open the board with #key=…).
+  function pair() {
+    const v = (window.prompt('Approve key (APPROVE_SECRET on the hub)') || '').trim();
+    if (!v) return;
+    approveKey = v;
+    saveKey(v);
+    refreshPrompts();
+  }
+  $('pair').addEventListener('click', pair);
+  {
+    const m = /(?:^#|&)key=([^&]+)/.exec(location.hash);
+    if (m) {
+      approveKey = decodeURIComponent(m[1]);
+      saveKey(approveKey);
+      history.replaceState(null, '', location.pathname + location.search);
+    }
   }
 
   function post(path, id) {
@@ -336,6 +570,9 @@
     $('total').textContent = p.counts.total + (p.counts.total === 1 ? ' session' : ' sessions');
 
     usage = p.usage || null;
+    pendingCount = p.permissions || 0;
+    renderPrompts();
+    refreshPrompts();
 
     const v = p.vitals;
     $('vitals').hidden = !v;

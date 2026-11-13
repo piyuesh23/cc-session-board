@@ -27,6 +27,7 @@ function run(cmd, args, { input, env }) {
 const { createHub } = require('../server');
 
 const HOOK = path.join(__dirname, '..', 'hooks', 'cc_board_hook.py');
+const PERMISSION = path.join(__dirname, '..', 'hooks', 'cc_board_permission.py');
 const USAGE = path.join(__dirname, '..', 'hooks', 'cc_board_usage.py');
 const WRAPPER = path.join(__dirname, '..', 'hooks', 'cc_board_statusline.sh');
 const SECRET = 'test-secret';
@@ -81,8 +82,9 @@ async function withHubAndScratch(fn) {
   const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'cc-board-hook-'));
   const env = { PATH: process.env.PATH, HOME: scratch, TMPDIR: scratch, CC_BOARD_URL: base, CC_BOARD_SECRET: SECRET, CC_BOARD_HOST: 'testbox' };
   const board = async () => (await fetch(base + '/sessions')).json();
+  const authed = (p, init = {}) => fetch(base + p, { ...init, headers: { 'content-type': 'application/json', 'x-board-secret': SECRET } });
   try {
-    await fn({ base, env, board });
+    await fn({ base, env, board, authed });
   } finally {
     hub.server.closeAllConnections();
     await new Promise((resolve) => hub.server.close(resolve));
@@ -166,5 +168,118 @@ test('the status line wrapper passes the JSON through and pushes in the backgrou
     const quiet = await run('bash', [WRAPPER], { input, env });
     assert.equal(quiet.status, 0);
     assert.equal(quiet.stdout, '', 'no wrapped command, no output');
+  });
+});
+
+const permissionInput = {
+  hook_event_name: 'PermissionRequest',
+  session_id: 'perm-e2e',
+  cwd: path.join(__dirname, '..'),
+  permission_mode: 'default',
+  tool_name: 'Bash',
+  tool_input: { command: 'export API_TOKEN=sk-abcdefghijklmnop1234 && ./deploy.sh' },
+};
+
+// Start the permission hook, wait for its request to reach the hub, answer it
+// remotely and return what the hook printed.
+async function answerRemotely({ env, authed }, decision) {
+  const hook = run('python3', [PERMISSION], { input: JSON.stringify(permissionInput), env });
+  let pending = [];
+  for (let i = 0; i < 50 && !pending.length; i++) {
+    await new Promise((r) => setTimeout(r, 100));
+    pending = (await (await authed('/permissions')).json()).pending;
+  }
+  assert.equal(pending.length, 1, 'the hook posted its request');
+  assert.equal(pending[0].tool, 'Bash');
+  assert.equal(pending[0].target, 'export API_TOKEN=*** && ./deploy.sh');
+  assert.equal(pending[0].project, 'cc-session-board');
+  assert.equal(pending[0].host, 'testbox');
+  const res = await authed(`/permission/${pending[0].id}/decide`, { method: 'POST', body: JSON.stringify(decision) });
+  assert.equal(res.status, 200);
+  const done = await hook;
+  assert.equal(done.status, 0, done.stderr);
+  return done.stdout;
+}
+
+test('the permission hook prints allow when the remote allows', { skip }, async () => {
+  await withHubAndScratch(async (ctx) => {
+    const out = await answerRemotely(ctx, { decision: 'allow' });
+    assert.deepEqual(JSON.parse(out), {
+      hookSpecificOutput: { hookEventName: 'PermissionRequest', decision: { behavior: 'allow' } },
+    });
+  });
+});
+
+test('the permission hook prints deny with the remote message, or a default one', { skip }, async () => {
+  await withHubAndScratch(async (ctx) => {
+    const out = await answerRemotely(ctx, { decision: 'deny', message: 'Not on a Friday' });
+    assert.deepEqual(JSON.parse(out).hookSpecificOutput.decision, { behavior: 'deny', message: 'Not on a Friday' });
+    const plain = await answerRemotely(ctx, { decision: 'deny' });
+    assert.deepEqual(JSON.parse(plain).hookSpecificOutput.decision, { behavior: 'deny', message: 'Denied from the remote' });
+  });
+});
+
+test('with no answer the permission hook cancels and prints nothing', { skip }, async () => {
+  await withHubAndScratch(async ({ env, authed, board }) => {
+    const started = Date.now();
+    const done = await run('python3', [PERMISSION], { input: JSON.stringify(permissionInput), env: { ...env, CC_BOARD_APPROVE_WAIT: '1' } });
+    assert.equal(done.status, 0, done.stderr);
+    assert.equal(done.stdout, '', 'nothing printed: Claude Code shows its own prompt');
+    assert.ok(Date.now() - started < 8000);
+    assert.deepEqual((await (await authed('/permissions')).json()).pending, [], 'cancelled on the hub');
+    assert.equal((await board()).permissions, 0);
+  });
+});
+
+test('the permission hook stays out of the way when off or when the hub is down', { skip }, async () => {
+  await withHubAndScratch(async ({ env, authed }) => {
+    const off = await run('python3', [PERMISSION], { input: JSON.stringify(permissionInput), env: { ...env, CC_BOARD_APPROVE_WAIT: '0' } });
+    assert.deepEqual([off.status, off.stdout], [0, '']);
+    assert.deepEqual((await (await authed('/permissions')).json()).pending, [], 'off means nothing is posted');
+
+    const down = await run('python3', [PERMISSION], { input: JSON.stringify(permissionInput), env: { ...env, CC_BOARD_URL: 'http://127.0.0.1:9' } });
+    assert.deepEqual([down.status, down.stdout, down.stderr], [0, '', '']);
+
+    const junk = await run('python3', [PERMISSION], { input: 'not json', env });
+    assert.deepEqual([junk.status, junk.stdout], [0, '']);
+  });
+});
+
+test('the permission hook answers AskUserQuestion with the original question text', { skip }, async () => {
+  await withHubAndScratch(async ({ env, authed }) => {
+    // The first question carries a credential: the hub only ever sees it masked,
+    // so the hook must key the answer by Claude's original text, not the hub's.
+    const tool_input = {
+      questions: [
+        { question: 'Use API_TOKEN=abc123secretvalue for staging?', header: 'Token', multiSelect: false,
+          options: [{ label: 'Yes', description: 'use it' }, { label: 'No', description: 'ask me' }] },
+        { question: 'Which checks?', header: 'Checks', multiSelect: true,
+          options: [{ label: 'Lint', description: '' }, { label: 'Unit', description: '' }, { label: 'E2E', description: '' }] },
+      ],
+    };
+    const hook = run('python3', [PERMISSION], {
+      input: JSON.stringify({ ...permissionInput, session_id: 'ask-e2e', tool_name: 'AskUserQuestion', tool_input }),
+      env,
+    });
+    let pending = [];
+    for (let i = 0; i < 50 && !pending.length; i++) {
+      await new Promise((r) => setTimeout(r, 100));
+      pending = (await (await authed('/permissions')).json()).pending;
+    }
+    assert.equal(pending.length, 1);
+    assert.equal(pending[0].questions[0].question, 'Use API_TOKEN=*** for staging?');
+    const res = await authed(`/permission/${pending[0].id}/decide`, {
+      method: 'POST', body: JSON.stringify({ decision: 'allow', answers: ['No', ['E2E', 'Lint']] }),
+    });
+    assert.equal(res.status, 200);
+    const done = await hook;
+    assert.equal(done.status, 0, done.stderr);
+    assert.deepEqual(JSON.parse(done.stdout).hookSpecificOutput.decision, {
+      behavior: 'allow',
+      updatedInput: {
+        ...tool_input,
+        answers: { 'Use API_TOKEN=abc123secretvalue for staging?': 'No', 'Which checks?': 'Lint, E2E' },
+      },
+    });
   });
 });

@@ -9,6 +9,11 @@
 //   GET  /live      same payload pushed over Server-Sent Events, plus a ping every 15s
 //   POST /ack       board tap: acknowledge a tile
 //   POST /hide      board long press: hide a tile until its next event
+//   POST /permission              a hook is waiting on a permission prompt (needs x-board-secret)
+//   GET  /permission/<id>?wait=s  long-poll for the answer (needs x-board-secret)
+//   GET  /permissions             pending prompts, oldest first (x-board-secret or the approve key)
+//   POST /permission/<id>/decide  allow / deny / answer from the remote (x-board-secret or the approve key)
+//   POST /permission/<id>/cancel  the hook gave up (needs x-board-secret)
 //   GET  /          the board page
 
 const http = require('node:http');
@@ -17,10 +22,15 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { execFileSync } = require('node:child_process');
 const { Store } = require('./lib/store');
+const { Permissions } = require('./lib/permissions');
 
 const MAX_BODY = 64 * 1024;
 const VITALS_FRESH_MS = 2 * 60e3;
 const USAGE_WINDOWS = ['five_hour', 'seven_day'];
+// Longest a single long-poll is held. Short enough that proxies & the hook's
+// own socket timeout never cut it first; the hook simply asks again.
+const MAX_WAIT_S = 30;
+const PERMISSION_PATH = /^\/permission\/([0-9a-f]{1,64})(?:\/(decide|cancel))?$/;
 
 function readConfig(env = process.env) {
   const minutes = (name, fallback) => {
@@ -31,6 +41,9 @@ function readConfig(env = process.env) {
     port: env.PORT === undefined ? 8787 : Number(env.PORT),
     host: env.HOST || '0.0.0.0',
     secret: env.BOARD_SECRET || '',
+    // A narrower key for the board page: it can list & answer prompts, but not
+    // post events or open new prompts. Empty means only BOARD_SECRET works.
+    approveSecret: env.APPROVE_SECRET || '',
     staleMin: minutes('STALE_MIN', 10),
     hideMin: minutes('HIDE_MIN', 60),
     blockedMaxH: minutes('BLOCKED_MAX_H', 24),
@@ -86,6 +99,16 @@ function parseUsage(body) {
   };
 }
 
+// What the tile says while a prompt waits: the question itself, or "Allow <tool> <target>?".
+function promptText(body) {
+  const q = Array.isArray(body.questions) && body.questions[0];
+  if (q && typeof q.question === 'string' && q.question.trim()) {
+    const more = body.questions.length > 1 ? ` (+${body.questions.length - 1} more)` : '';
+    return q.question.trim() + more;
+  }
+  return ['Allow', body.tool, body.target].filter((x) => typeof x === 'string' && x).join(' ') + '?';
+}
+
 function sameSecret(given, expected) {
   if (typeof given !== 'string' || !expected) return false;
   const a = crypto.createHash('sha256').update(given).digest();
@@ -134,6 +157,7 @@ function createHub(config = readConfig()) {
     hideMs: config.hideMin * 60e3,
     blockedMaxMs: config.blockedMaxH * 60 * 60e3,
   });
+  const permissions = new Permissions({ now: config.now || Date.now });
   const clients = new Set();
   let vitals = null;
   let usage = null;
@@ -160,13 +184,15 @@ function createHub(config = readConfig()) {
       },
       vitals: fresh,
       usage,
+      // Only a count: the prompts themselves are behind the secret.
+      permissions: permissions.count(),
       config: { quietHours: config.quietHours },
     };
   }
 
   // Everything except the clock, so the ticker only pushes real changes.
   function fingerprint(p) {
-    return JSON.stringify([p.sessions, p.counts, p.vitals, p.usage]);
+    return JSON.stringify([p.sessions, p.counts, p.vitals, p.usage, p.permissions]);
   }
 
   function broadcast(force = false) {
@@ -258,6 +284,10 @@ function createHub(config = readConfig()) {
       return send(res, 200, { ok: true });
     }
 
+    if (route === 'POST /permission' || route === 'GET /permissions' || PERMISSION_PATH.test(url.pathname)) {
+      return handlePermission(req, res, url);
+    }
+
     // Board actions. No secret: the page cannot keep one, so the hub must only
     // be reachable over the tailnet (see README).
     if (route === 'POST /ack' || route === 'POST /hide') {
@@ -269,6 +299,81 @@ function createHub(config = readConfig()) {
     }
 
     send(res, 404, { ok: false, error: 'not found' });
+  }
+
+  // Remote approval. Unlike /ack, every route needs a key: an answer here lets
+  // a tool run on a laptop, so network position alone is not enough. The hook
+  // routes take only BOARD_SECRET; listing & answering also take APPROVE_SECRET.
+  async function handlePermission(req, res, url) {
+    const given = req.headers['x-board-secret'];
+    const route = `${req.method} ${url.pathname}`;
+    const answering = route === 'GET /permissions' || /\/decide$/.test(url.pathname);
+    const allowed = sameSecret(given, config.secret) || (answering && sameSecret(given, config.approveSecret));
+    if (!allowed) return send(res, 401, { ok: false, error: 'bad or missing x-board-secret' });
+
+    if (route === 'POST /permission') {
+      const body = await readJson(req);
+      const result = permissions.create(body);
+      if (!result.ok) return send(res, 400, result);
+      // Claude Code shows no prompt (& sends no Notification) while the hook
+      // waits, so mark the tile amber here or the board would say "working".
+      store.apply({
+        session_id: body.session_id,
+        event: 'notification',
+        notification_type: 'permission_prompt',
+        project: body.project,
+        branch: body.branch,
+        host: body.host,
+        message: promptText(body),
+      });
+      changed();
+      return send(res, 200, { ok: true, id: result.id });
+    }
+
+    if (route === 'GET /permissions') return send(res, 200, { ok: true, pending: permissions.pending() });
+
+    const match = PERMISSION_PATH.exec(url.pathname);
+    const [, id, action] = match || [];
+    if (!match || req.method !== (action ? 'POST' : 'GET')) return send(res, 404, { ok: false, error: 'not found' });
+
+    if (action === 'decide') {
+      const body = await readJson(req);
+      const result = permissions.decide(id, body.decision, body.message, body.answers);
+      if (!result.ok) return send(res, result.status, { ok: false, error: result.error });
+      broadcast();
+      return send(res, 200, { ok: true });
+    }
+
+    if (action === 'cancel') {
+      if (!permissions.cancel(id)) return send(res, 404, { ok: false, error: 'no such permission request' });
+      broadcast();
+      return send(res, 200, { ok: true });
+    }
+
+    return longPoll(res, id, Number(url.searchParams.get('wait')));
+  }
+
+  // Answer at once if decided, otherwise hold the request until it is or the
+  // wait runs out. A hook that disconnects leaves no listener or timer behind.
+  function longPoll(res, id, wait) {
+    const now = permissions.get(id);
+    if (!now) return send(res, 404, { ok: false, error: 'no such permission request' });
+    const seconds = Number.isFinite(wait) ? Math.min(Math.max(wait, 0), MAX_WAIT_S) : 0;
+    if (now.state !== 'pending' || seconds === 0) return send(res, 200, { ok: true, ...now });
+
+    let off = null;
+    let timer = null;
+    const finish = (result) => {
+      off();
+      clearTimeout(timer);
+      if (!res.writableEnded) send(res, 200, { ok: true, ...result });
+    };
+    off = permissions.onSettle(id, finish);
+    timer = setTimeout(() => finish(permissions.get(id) || { state: 'cancelled' }), seconds * 1000);
+    res.on('close', () => {
+      off();
+      clearTimeout(timer);
+    });
   }
 
   const server = http.createServer((req, res) => {
@@ -287,6 +392,7 @@ function createHub(config = readConfig()) {
   // it and tell a quiet board from a dead socket (iOS drops them silently).
   const ticker = setInterval(() => {
     for (const res of clients) res.write('event: ping\ndata: {}\n\n');
+    permissions.sweep(); // expiry wakes any long-poll still waiting
     broadcast();
   }, config.keepAliveMs || 15e3);
   ticker.unref();
@@ -296,7 +402,7 @@ function createHub(config = readConfig()) {
     for (const res of clients) res.end();
   });
 
-  return { server, store, config };
+  return { server, store, permissions, config };
 }
 
 if (require.main === module) {
@@ -321,4 +427,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { createHub, readConfig, resolveHost, bindWarning, parseUsage };
+module.exports = { promptText, createHub, readConfig, resolveHost, bindWarning, parseUsage };
